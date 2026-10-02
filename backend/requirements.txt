@@ -1,0 +1,34 @@
+# ─── Web framework ───
+fastapi==0.115.6
+uvicorn[standard]==0.34.0
+python-multipart==0.0.20
+
+# ─── Config / validation ───
+pydantic==2.10.5
+pydantic-settings==2.7.1
+email-validator==2.2.0
+
+# ─── Database (MySQL) ───
+SQLAlchemy==2.0.36
+PyMySQL==1.1.1
+cryptography==44.0.0           # required by PyMySQL for caching_sha2_password auth
+alembic==1.14.1
+
+# ─── Document processing ───
+PyMuPDF==1.25.1                # PDF text + page + coordinate extraction
+python-docx==1.1.2             # DOCX read/write
+lxml==5.3.0                    # low-level OOXML manipulation (tracked changes)
+
+# ─── Matching ───
+rapidfuzz==3.11.0             # fuzzy quote matching
+
+# ─── AI (Gemini) ───
+google-genai==1.10.0
+
+# ─── Files ───
+aiofiles==24.1.0
+
+# ─── Testing ───
+pytest==8.3.4
+pytest-asyncio==0.25.0
+httpx==0.28.1

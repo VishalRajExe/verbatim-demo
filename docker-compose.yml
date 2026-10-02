@@ -1,0 +1,20 @@
+# Local development MySQL. Production should use a managed MySQL (Aiven/Railway)
+# via DATABASE_URL; this compose file is only for a convenient local instance.
+services:
+  mysql:
+    image: mysql:9.6
+    container_name: lci-mysql
+    restart: unless-stopped
+    environment:
+      MYSQL_ROOT_PASSWORD: devroot
+      MYSQL_DATABASE: legal_contract_intelligence
+      MYSQL_USER: lci
+      MYSQL_PASSWORD: lci
+    ports:
+      - "3306:3306"
+    volumes:
+      - lci-mysql-data:/var/lib/mysql
+    command: --default-authentication-plugin=mysql_native_password
+
+volumes:
+  lci-mysql-data:
