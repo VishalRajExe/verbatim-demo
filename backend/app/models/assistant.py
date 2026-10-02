@@ -164,6 +164,7 @@ class Redline(Base):
         ForeignKey("documents.id", ondelete="CASCADE"), nullable=False, index=True
     )
     author: Mapped[str] = mapped_column(String(128), nullable=False, default="Legal AI")
+    instruction: Mapped[str | None] = mapped_column(Text, nullable=True)
     applied_json: Mapped[list | None] = mapped_column(JSON, nullable=True)
     dropped_json: Mapped[list | None] = mapped_column(JSON, nullable=True)
     insertions: Mapped[int] = mapped_column(Integer, nullable=False, default=0)

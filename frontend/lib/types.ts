@@ -151,12 +151,27 @@ export interface RedlineOut {
   id: string;
   documentId: string;
   author: string;
+  instruction: string | null;
   insertions: number;
   deletions: number;
   applied: { target: string; replacement: string }[];
   dropped: { target: string; reason: string }[];
   downloadUrl: string;
   createdAt: string;
+}
+
+export interface ProposedEdit {
+  target: string;
+  replacement: string;
+  reason: string;
+  include: boolean;
+}
+
+export interface RedlineProposeOut {
+  documentId: string;
+  instruction: string;
+  proposed: ProposedEdit[];
+  dropped: { target: string; reason: string }[];
 }
 
 // ── Locate ──

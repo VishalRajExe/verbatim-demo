@@ -36,7 +36,9 @@ def compose_prompt(question: str, verified_quotes: list[dict], multi: bool) -> s
     for q in verified_quotes:
         label = f"{q['ref']}"
         doc = q.get("documentName") or "the document"
-        lines.append(f"[{label}] ({doc}): {q['text']}")
+        # Flatten PDF line-wrap newlines so each quote stays on one line.
+        text = " ".join((q["text"] or "").split())
+        lines.append(f"[{label}] ({doc}): {text}")
     quotes_block = "\n".join(lines)
 
     base = (

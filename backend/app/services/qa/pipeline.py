@@ -11,6 +11,7 @@ persistence layer stores messages/quotes.
 """
 from __future__ import annotations
 
+import re
 from typing import Iterator
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
@@ -24,6 +25,35 @@ from app.services.qa.chunker import chunk_text
 from app.services.qa.cite_filter import CitationFilter
 from app.services.qa.coverage import DocumentCoverage, caveat, not_found_message
 from app.services.qa.prompts import compose_prompt, extract_prompt
+
+# On very large documents the extract phase can surface hundreds of verified
+# quotes. Compose is capped to the top-N most relevant to the question
+# (deterministic word-overlap ranking, original order as tie-break) so answers
+# stay focused and the prompt stays bounded.
+_MAX_COMPOSE_QUOTES = 24
+
+
+def _rank_quotes(verified: list[dict], question: str) -> list[dict]:
+    # Always sort by relevance (stable, original order as tie-break), then
+    # cap the list. On small sets this merely moves exact matches forward.
+    qlo = question.lower()
+    terms = {
+        p for w in re.findall(r"[a-z][a-z0-9]*(?:[-_][a-z0-9]+)*", qlo)
+        for p in w.split("-") if len(p) >= 4 and p.isalpha()
+    }
+    numbers = {n.lstrip("0") or "0" for n in re.findall(r"(?<![a-z0-9])\d{1,3}(?![a-z0-9])", qlo)}
+    scored = []
+    for i, v in enumerate(verified):
+        slo = v["text"].lower()
+        parts = {
+            p for w in re.findall(r"[a-z][a-z0-9]*(?:[-_][a-z0-9]+)*", slo)
+            for p in w.split("-")
+        }
+        nums = {n.lstrip("0") or "0" for n in re.findall(r"(?<![a-z0-9])\d{1,3}(?![a-z0-9])", slo)}
+        hit = sum(1 for t in terms if t in parts) + sum(1 for n in numbers if n in nums)
+        scored.append((-hit, i, v))
+    scored.sort()
+    return [v for _, _, v in scored[:_MAX_COMPOSE_QUOTES]]
 
 
 def ask_stream(
@@ -120,6 +150,7 @@ def ask_stream(
                 )
 
     # Number verified quotes and emit the quote + coverage events.
+    verified = _rank_quotes(verified, question)
     for i, v in enumerate(verified, start=1):
         v["ref"] = f"Q{i}"
     yield {

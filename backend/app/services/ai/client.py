@@ -61,9 +61,22 @@ class GeminiClient:
             raise _to_llm_error(exc) from exc
 
 
+_NUMS_RE = re.compile(r"(?<![A-Za-z0-9])\d{1,3}(?![A-Za-z0-9])")
+
+
 class MockClient:
     """Deterministic offline stand-in. Extracts real sentences from the chunk and
     composes an answer ONLY from the verified quotes in the prompt."""
+
+    # Generic contract words that would otherwise match every sentence and make
+    # the mock's keyword scoring useless ("agreement", "party", ...).
+    _STOPWORDS = {
+        "what", "when", "where", "which", "who", "why", "how", "does", "doc",
+        "docs", "document", "documents", "agreement", "party", "parties",
+        "this", "that", "with", "from", "under", "have", "has", "had",
+        "will", "shall", "are", "was", "were", "about", "into", "over",
+        "them", "they", "their", "your", "been", "being", "must", "may",
+    }
 
     def complete(self, prompt: str) -> str:
         return "\n".join(self._compose_lines(prompt))
@@ -74,19 +87,49 @@ class MockClient:
             yield word
 
     def complete_json(self, prompt: str) -> dict | list | None:
+        if "You propose MINIMAL tracked-change edits" in prompt:
+            return self._propose_edits(prompt)
         q = _extract_field(prompt, "Question:")
         doc = _extract_chunk_data(prompt)
         sentences = re.split(r"(?<=[.!?])\s+", doc)
-        keywords = {w.lower() for w in re.findall(r"[A-Za-z]{4,}", q)}
+        # Hyphen-compounds (PAGE-UNIQUE-TOKEN-087) and bare numbers (page 87)
+        # must both contribute keywords, or every token sentence ties on score
+        # and the mock answers with the wrong page.
+        keywords = {
+            part.lower()
+            for word in re.findall(r"[A-Za-z][A-Za-z0-9]*(?:[-_][A-Za-z0-9]+)*", q)
+            for part in word.split("-")
+            if len(part) >= 4 and part.isalpha()
+        }
+        numbers = {n.lstrip("0") or "0" for n in _NUMS_RE.findall(q)}
+        focused = keywords - self._STOPWORDS
+        if focused:
+            keywords = focused
+        else:
+            numbers = set()
+        if numbers:
+            # "page 87" queries: keep the word "page" so the "Page 87 of 150"
+            # marker and the page's own sentences both rise to the top.
+            keywords = keywords | {"page"}
         scored = []
         for s in sentences:
             s = s.strip()
             if len(s) < 25:
                 continue
-            hit = sum(1 for w in keywords if w in s.lower())
+            slo_s = s.lower()
+            nums = {n.lstrip("0") or "0" for n in _NUMS_RE.findall(slo_s)}
+            hit = sum(1 for w in keywords if w in slo_s) + sum(
+                1 for n in numbers if n in nums
+            )
+            # Exact-page signal: "Page 87" marker lines and token identifiers
+            # (…-087) both contain the digits, plain filler sentences do not.
+            hit += sum(1 for n in _NUMS_RE.findall(q.lower()) if n in slo_s)
             scored.append((hit, s))
-        scored.sort(key=lambda x: -x[0])
-        quotes = [{"text": s, "why": "mock relevance"} for hit, s in scored[:3] if hit > 0]
+        # Richer selection than top-3: multi-section answers (e.g. an incident
+        # timeline split across clauses) need more candidate sentences per
+        # chunk; ties fall back to the most informative (longest) sentence.
+        scored.sort(key=lambda x: (-x[0], -len(x[1])))
+        quotes = [{"text": s, "why": "mock relevance"} for hit, s in scored[:5] if hit > 0]
         return {"quotes": quotes}
 
     def _compose_lines(self, prompt: str) -> list[str]:
@@ -97,6 +140,50 @@ class MockClient:
         for ref, _doc, text in refs:
             out.append(f"- {text.strip()} [{ref}]")
         return out
+
+    def _propose_edits(self, prompt: str) -> dict:
+        """Offline redline proposals: swap the instruction's from-value for the
+        to-value wherever the from-value literally appears in this section."""
+        from app.services.redlining.instructions import (
+            extract_value_tokens,
+            normalize_value,
+            parse_instruction,
+        )
+
+        instruction = _extract_field(prompt, "Instruction:")
+        data = _extract_chunk_data(prompt)
+        edits = []
+        for intent in parse_instruction(instruction):
+            expected = intent.expected_original
+            if not expected or not intent.new_value:
+                continue
+            want = normalize_value(expected)
+            for tok in extract_value_tokens(data):
+                if normalize_value(tok) == want:
+                    edits.append(
+                        {
+                            "target": tok,
+                            "replacement": intent.new_value,
+                            "reason": "mock value swap",
+                        }
+                    )
+                    break
+            else:
+                # Non-numeric target: locate the phrase itself, whitespace-
+                # tolerant, and copy the raw text as the verbatim target.
+                pattern = re.compile(
+                    r"\s+".join(re.escape(w) for w in expected.split()), re.IGNORECASE
+                )
+                m = pattern.search(data)
+                if m:
+                    edits.append(
+                        {
+                            "target": m.group(0),
+                            "replacement": intent.new_value,
+                            "reason": "mock phrase swap",
+                        }
+                    )
+        return {"edits": edits}
 
 
 def _extract_field(prompt: str, marker: str) -> str:

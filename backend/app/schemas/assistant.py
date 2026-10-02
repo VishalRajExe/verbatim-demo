@@ -120,6 +120,29 @@ class RedlineRequest(BaseModel):
 
     edits: list[RedlineEdit] = Field(min_length=1)
     author: str = Field(default="Legal AI", max_length=128)
+    instruction: str | None = Field(default=None, max_length=4000)
+
+
+class RedlineProposeRequest(BaseModel):
+    model_config = ConfigDict(populate_by_name=True)
+
+    instruction: str = Field(min_length=3, max_length=4000)
+
+
+class ProposedEditOut(BaseModel):
+    target: str
+    replacement: str
+    reason: str = ""
+    include: bool = True
+
+
+class RedlineProposeOut(BaseModel):
+    model_config = ConfigDict(populate_by_name=True)
+
+    documentId: str
+    instruction: str
+    proposed: list[ProposedEditOut] = Field(default_factory=list)
+    dropped: list[dict] = Field(default_factory=list)
 
 
 class RedlineOut(BaseModel):
@@ -128,6 +151,7 @@ class RedlineOut(BaseModel):
     id: str
     documentId: str = Field(validation_alias="document_id")
     author: str
+    instruction: str | None = None
     insertions: int
     deletions: int
     applied: list = Field(default_factory=list, validation_alias="applied_json")

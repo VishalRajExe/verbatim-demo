@@ -13,11 +13,20 @@ from fastapi import APIRouter, Depends, HTTPException
 from fastapi.responses import FileResponse
 from sqlalchemy.orm import Session
 
+from app.api.qa import get_llm_dep
 from app.core.config import get_settings
 from app.db.session import get_db
 from app.models.assistant import Redline
 from app.models.document import Document, DocumentStatus
-from app.schemas.assistant import RedlineOut, RedlineRequest
+from app.schemas.assistant import (
+    RedlineOut,
+    RedlineProposeOut,
+    RedlineProposeRequest,
+    RedlineRequest,
+)
+from app.services.ai.client import LLMClient
+from app.services.ai.retry import LLMError
+from app.services.redlining.propose import propose_redline
 from app.services.redlining.service import Edit, apply_redlines
 
 router = APIRouter(tags=["redlines"])
@@ -33,10 +42,8 @@ def _redlines_dir() -> Path:
     return d
 
 
-@router.post("/documents/{doc_id}/redline", response_model=RedlineOut, status_code=201)
-def create_redline(
-    doc_id: str, body: RedlineRequest, db: Session = Depends(get_db)
-) -> RedlineOut:
+def _ready_docx(db: Session, doc_id: str) -> Document:
+    """Shared precondition for both redline endpoints (same checks, one place)."""
     doc = db.get(Document, doc_id)
     if doc is None:
         raise HTTPException(404, "Document not found.")
@@ -49,6 +56,41 @@ def create_redline(
     src = Path(doc.file_path)
     if not src.exists():
         raise HTTPException(404, "Source file not found on storage.")
+    return doc
+
+
+@router.post("/documents/{doc_id}/redline/propose", response_model=RedlineProposeOut)
+def propose_redline_edits(
+    doc_id: str,
+    body: RedlineProposeRequest,
+    db: Session = Depends(get_db),
+    llm: LLMClient = Depends(get_llm_dep),
+) -> RedlineProposeOut:
+    """Turn a plain-English instruction into reviewable edit proposals.
+
+    Nothing is written to the document here: every proposed target has already
+    been verified verbatim (exactly-once) against the authoritative DOCX text,
+    and instructions naming an original value are rejected deterministically
+    when that value is absent. The user reviews and then applies the selection.
+    """
+    doc = _ready_docx(db, doc_id)
+    src = Path(doc.file_path)
+    try:
+        result = propose_redline(db, doc, body.instruction, llm, src.read_bytes())
+    except LLMError as exc:
+        raise HTTPException(502, exc.message)
+    except Exception as exc:  # noqa: BLE001 - clean 500, no internals leaked
+        raise HTTPException(500, "Could not analyse the document for edits.") from exc
+    data = result.to_dict()
+    return RedlineProposeOut(documentId=doc.id, **data)
+
+
+@router.post("/documents/{doc_id}/redline", response_model=RedlineOut, status_code=201)
+def create_redline(
+    doc_id: str, body: RedlineRequest, db: Session = Depends(get_db)
+) -> RedlineOut:
+    doc = _ready_docx(db, doc_id)
+    src = Path(doc.file_path)
 
     edits = [Edit(target=e.target, replacement=e.replacement) for e in body.edits]
     try:
@@ -64,6 +106,7 @@ def create_redline(
         id=redline_id,
         document_id=doc_id,
         author=body.author,
+        instruction=body.instruction,
         applied_json=[{"target": e.target, "replacement": e.replacement} for e in result.applied],
         dropped_json=result.dropped,
         insertions=result.insertions,
@@ -77,8 +120,13 @@ def create_redline(
 
 
 @router.get("/redlines", response_model=list[RedlineOut])
-def list_redlines(db: Session = Depends(get_db)) -> list[RedlineOut]:
-    rows = db.query(Redline).order_by(Redline.created_at.desc()).all()
+def list_redlines(
+    document_id: str | None = None, db: Session = Depends(get_db)
+) -> list[RedlineOut]:
+    q = db.query(Redline)
+    if document_id:
+        q = q.filter(Redline.document_id == document_id)
+    rows = q.order_by(Redline.created_at.desc()).all()
     return [_to_out(r) for r in rows]
 
 

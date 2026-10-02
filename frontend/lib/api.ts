@@ -8,6 +8,7 @@ import type {
   DocumentPagesOut,
   LocateResponse,
   RedlineOut,
+  RedlineProposeOut,
   UploadAccepted,
 } from "./types";
 
@@ -154,9 +155,31 @@ export async function listComparisons(): Promise<ComparisonResult[]> {
 }
 
 // ── Redline ──
+export async function proposeRedline(
+  docId: string,
+  instruction: string,
+): Promise<RedlineProposeOut> {
+  const res = await fetch(`${API_BASE}/api/documents/${docId}/redline/propose`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ instruction }),
+  });
+  return handle<RedlineProposeOut>(res);
+}
+
+export async function listRedlines(documentId?: string): Promise<RedlineOut[]> {
+  const q = documentId ? `?document_id=${encodeURIComponent(documentId)}` : "";
+  const res = await fetch(`${API_BASE}/api/redlines${q}`, { cache: "no-store" });
+  return handle<RedlineOut[]>(res);
+}
+
 export async function createRedline(
   docId: string,
-  body: { edits: { target: string; replacement: string }[]; author?: string },
+  body: {
+    edits: { target: string; replacement: string }[];
+    author?: string;
+    instruction?: string | null;
+  },
 ): Promise<RedlineOut> {
   const res = await fetch(`${API_BASE}/api/documents/${docId}/redline`, {
     method: "POST",

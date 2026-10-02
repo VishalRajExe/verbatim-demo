@@ -39,6 +39,7 @@ export function ChatView() {
   const [running, setRunning] = useState(false);
   const [progress, setProgress] = useState("");
   const [history, setHistory] = useState<ConversationSummary[]>([]);
+  const [activeConv, setActiveConv] = useState<string | null>(null);
   const [activeQuote, setActiveQuote] = useState<VerifiedQuote | null>(null);
   const abortRef = useRef<AbortController | null>(null);
 
@@ -83,7 +84,9 @@ export function ChatView() {
       });
 
     const onEvent = (e: AskEvent) => {
-      if (e.type === "status") {
+      if (e.type === "meta") {
+        setActiveConv(e.conversationId); // follow-ups continue this conversation
+      } else if (e.type === "status") {
         setProgress(`Reading ${e.documentName} (${e.done}/${e.total})…`);
       } else if (e.type === "quotes") {
         patch((d) => ({ ...d, quotes: e.quotes, unverified: e.unverified }));
@@ -102,12 +105,24 @@ export function ChatView() {
 
     try {
       await askStream(
-        { documentIds: [...selected], question, conversationId: undefined },
+        { documentIds: [...selected], question, conversationId: activeConv ?? undefined },
         onEvent,
         controller.signal,
       );
     } catch (err) {
-      patch((d) => ({ ...d, answer: d.answer || `⚠ ${(err as Error).message}` }));
+      // A user-initiated Stop aborts the fetch mid-stream: that is an expected
+      // outcome, not a failure, so keep the partial answer and mark it stopped
+      // instead of surfacing the raw "BodyStreamBuffer was aborted" text.
+      const e = err as Error;
+      const aborted =
+        controller.signal.aborted ||
+        e?.name === "AbortError" ||
+        /aborted/i.test(e?.message || "");
+      if (aborted) {
+        patch((d) => ({ ...d, status: d.status || "stopped" }));
+      } else {
+        patch((d) => ({ ...d, answer: d.answer || `⚠ ${e.message}`, status: "error" }));
+      }
     } finally {
       setRunning(false);
       setProgress("");
@@ -121,7 +136,13 @@ export function ChatView() {
   }
 
   async function openConversation(id: string) {
-    const detail = await getConversation(id);
+    let detail;
+    try {
+      detail = await getConversation(id);
+    } catch (err) {
+      setProgress(`Could not load chat: ${(err as Error).message}`);
+      return;
+    }
     const rebuilt: Turn[] = [];
     let lastQuestion = "";
     for (const m of detail.messages) {
@@ -159,6 +180,19 @@ export function ChatView() {
         });
     }
     setTurns(rebuilt);
+    setActiveConv(id);
+    // Re-scope the picker to the documents that conversation actually used,
+    // otherwise a follow-up silently asks different documents.
+    const used = new Set(
+      detail.messages.flatMap((m) => (m.quotes || []).map((q) => q.documentId)),
+    );
+    if (used.size) setSelected(used);
+  }
+
+  function newChat() {
+    abortRef.current?.abort();
+    setTurns([]);
+    setActiveConv(null);
   }
 
   const last = turns[turns.length - 1];
@@ -167,8 +201,14 @@ export function ChatView() {
     <div className="flex h-full">
       {/* History rail */}
       <div className="hidden w-60 shrink-0 flex-col border-r border-slate-200 bg-white lg:flex">
-        <div className="px-4 py-3 text-sm font-semibold text-slate-700">
-          Recent chats
+        <div className="flex items-center justify-between px-4 py-3">
+          <span className="text-sm font-semibold text-slate-700">Recent chats</span>
+          <button
+            onClick={newChat}
+            className="rounded-lg border border-slate-200 px-2 py-1 text-xs text-slate-600 hover:bg-slate-50"
+          >
+            + New chat
+          </button>
         </div>
         <div className="flex-1 space-y-1 overflow-y-auto px-2">
           {history.length === 0 && (
@@ -178,7 +218,11 @@ export function ChatView() {
             <button
               key={h.id}
               onClick={() => openConversation(h.id)}
-              className="block w-full truncate rounded-lg px-3 py-2 text-left text-sm text-slate-600 hover:bg-slate-50"
+              className={`block w-full truncate rounded-lg px-3 py-2 text-left text-sm hover:bg-slate-50 ${
+                activeConv === h.id
+                  ? "bg-brand-50 font-medium text-brand-700"
+                  : "text-slate-600"
+              }`}
             >
               {h.title}
             </button>
@@ -234,8 +278,14 @@ export function ChatView() {
         </div>
 
         <div className="border-t border-slate-200 bg-white px-6 py-4">
-          {running && progress && (
-            <div className="mb-2 text-xs text-brand-600">{progress}</div>
+          {progress && (
+            <div
+              className={`mb-2 text-xs ${
+                running ? "text-brand-600" : "text-red-600"
+              }`}
+            >
+              {progress}
+            </div>
           )}
           <div className="flex items-end gap-2">
             <textarea
@@ -313,6 +363,20 @@ function TurnBlock({
             >
               {q.ref} · p.{q.pageStart}
             </button>
+          ))}
+        </div>
+      )}
+      {turn.coverage.length > 0 && (
+        <div className="mt-2 flex flex-wrap gap-x-3 gap-y-1 text-[11px] text-slate-500">
+          {turn.coverage.map((c) => (
+            <span key={c.documentId} className="rounded bg-slate-50 px-1.5 py-0.5">
+              {c.name}: read {c.chunksRead}/{c.chunksTotal} chunks
+              {c.pages ? ` · ${c.pages} pp` : ""}
+              {c.complete
+                ? " · full coverage"
+                : ` · ${c.failedChunks.length} chunk(s) failed`}
+              {c.unreadablePages ? ` · ${c.unreadablePages} unreadable page(s)` : ""}
+            </span>
           ))}
         </div>
       )}
