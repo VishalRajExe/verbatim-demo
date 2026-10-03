@@ -1,19 +1,26 @@
-import { dirname } from "path";
-import { fileURLToPath } from "url";
-import { FlatCompat } from "@eslint/eslintrc";
+import { defineConfig } from "eslint/config";
+import nextVitals from "eslint-config-next/core-web-vitals";
+import nextTs from "eslint-config-next/typescript";
 
-const __filename = fileURLToPath(import.meta.url);
-const __dirname = dirname(__filename);
-
-const compat = new FlatCompat({ baseDirectory: __dirname });
-
-const eslintConfig = [
+const eslintConfig = defineConfig([
+  ...nextVitals,
+  ...nextTs,
   {
-    // Vendored/minified assets (e.g. public/pdfjs/pdf.worker.min.mjs) are not
-    // project source and must not be linted.
-    ignores: [".next/**", "node_modules/**", "next-env.d.ts", "public/**"],
+    // The migrated Verbatim UI relies on two React Compiler-era rules that were
+    // authored before those rules existed: fetching effects reset state before an
+    // async body (set-state-in-effect) and SWR refs read during render (refs).
+    // Rewriting that logic risks regressions, so these stay advisory (warn) while
+    // every correctness rule remains an error.
+    rules: {
+      "react-hooks/set-state-in-effect": "warn",
+      "react-hooks/refs": "warn",
+    },
   },
-  ...compat.extends("next/core-web-vitals", "next/typescript"),
-];
+  {
+    // Vendored/minified assets (e.g. public/pdfjs/pdf.worker.min.mjs) and build
+    // output are not project source and must not be linted.
+    ignores: [".next/**", "out/**", "node_modules/**", "next-env.d.ts", "public/**"],
+  },
+]);
 
 export default eslintConfig;
