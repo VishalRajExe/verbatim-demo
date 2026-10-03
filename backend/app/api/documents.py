@@ -34,6 +34,7 @@ from app.services.citations.service import (
     verify_quote,
 )
 from app.services.document_processing import process_document
+from app.services.qa.dedup import answer_cache
 from app.services.extraction.signatures import sniff_type
 
 logger = logging.getLogger(__name__)
@@ -216,6 +217,8 @@ def delete_document(doc_id: str, db: Session = Depends(get_db)) -> Response:
     # Remove stored file; pages cascade via FK ondelete.
     Path(doc.file_path).unlink(missing_ok=True)
     invalidate_document(doc_id)
+    # Drop any cached Q&A replayed over this document so it is never reused.
+    answer_cache.invalidate_document(doc_id)
     db.delete(doc)
     db.commit()
     return Response(status_code=204)

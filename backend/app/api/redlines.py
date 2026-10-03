@@ -26,6 +26,10 @@ from app.schemas.assistant import (
 )
 from app.services.ai.client import LLMClient
 from app.services.ai.retry import LLMError
+from app.services.qa.guard import (
+    REDLINE_UNUSABLE_MESSAGE,
+    is_usable_redline_instruction,
+)
 from app.services.redlining.propose import propose_redline
 from app.services.redlining.service import Edit, apply_redlines
 
@@ -75,6 +79,20 @@ def propose_redline_edits(
     """
     doc = _ready_docx(db, doc_id)
     src = Path(doc.file_path)
+    # Local pre-Gemini guard: obviously-unusable instructions (blank, keyboard
+    # spam, a lone vague verb) are answered here without any model call. Legit
+    # plain-English and semantic edits — including ones with no exact from/to
+    # value — fall through untouched so redline safety logic is never bypassed.
+    if not is_usable_redline_instruction(body.instruction):
+        return RedlineProposeOut(
+            documentId=doc.id,
+            instruction=body.instruction,
+            proposed=[],
+            dropped=[{
+                "instruction": body.instruction,
+                "reason": REDLINE_UNUSABLE_MESSAGE,
+            }],
+        )
     try:
         result = propose_redline(db, doc, body.instruction, llm, src.read_bytes())
     except LLMError as exc:

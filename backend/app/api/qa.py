@@ -23,7 +23,11 @@ from app.schemas.assistant import (
     ConversationSummary,
 )
 from app.services.ai.client import LLMClient, get_llm
+from app.services.qa.dedup import answer_cache, build_key
+from app.services.qa.guard import EMPTY_MESSAGE, classify_question
 from app.services.qa.pipeline import ask_stream
+
+_STREAM_HEADERS = {"X-Accel-Buffering": "no", "Cache-Control": "no-cache"}
 
 logger = logging.getLogger(__name__)
 router = APIRouter(tags=["qa"])
@@ -73,8 +77,35 @@ def ask(
         setup.commit()
         conv_id = conv.id
         doc_ids = [d.id for d in docs]
+        doc_versions = [d.updated_at.isoformat() for d in docs]
     finally:
         setup.close()
+
+    # --- Pre-Gemini query guard ------------------------------------------
+    # Local classifications short-circuit with a friendly reply: no chunk read,
+    # no retrieval and no Gemini call. A repeated-within-message question is
+    # collapsed; anything else reaches the pipeline with its ORIGINAL text so
+    # retrieval, verification and citations are entirely untouched.
+    guard = classify_question(body.question)
+    if guard.is_local:
+        return StreamingResponse(
+            _local_stream(conv_id, guard.message or EMPTY_MESSAGE, guard.reason),
+            media_type="application/x-ndjson",
+            headers=_STREAM_HEADERS,
+        )
+
+    question = guard.question or body.question
+
+    # Safe answer reuse: identical question over an identical, unchanged
+    # document scope replays the previously verified answer (no Gemini).
+    key = build_key(question, doc_ids, doc_versions)
+    hit = answer_cache.get(key)
+    if hit is not None:
+        return StreamingResponse(
+            _cached_stream(conv_id, hit),
+            media_type="application/x-ndjson",
+            headers=_STREAM_HEADERS,
+        )
 
     def event_stream():
         yield json.dumps({"type": "meta", "conversationId": conv_id}) + "\n"
@@ -87,7 +118,7 @@ def ask(
         stopped = False
         try:
             docs = [db.get(Document, did) for did in doc_ids]
-            for event in ask_stream(db, docs, body.question, llm):
+            for event in ask_stream(db, docs, question, llm):
                 etype = event.get("type")
                 if etype == "token":
                     answer_parts.append(event["text"])
@@ -110,18 +141,71 @@ def ask(
             ) + "\n"
         finally:
             try:
+                answer = "".join(answer_parts)
                 _persist_assistant(
-                    db, conv_id, "".join(answer_parts), status, stopped,
+                    db, conv_id, answer, status, stopped,
                     coverage_payload, quotes_payload, unverified_payload,
                 )
+                # Populate the reuse cache only for a clean, completed answer so
+                # an interrupted or errored turn is never replayed.
+                if status == "complete" and not stopped:
+                    answer_cache.set(key, {
+                        "answer": answer,
+                        "quotes": quotes_payload,
+                        "unverified": unverified_payload,
+                        "coverage": coverage_payload,
+                        "doc_ids": list(doc_ids),
+                    })
             finally:
                 db.close()
 
     return StreamingResponse(
         event_stream(),
         media_type="application/x-ndjson",
-        headers={"X-Accel-Buffering": "no", "Cache-Control": "no-cache"},
+        headers=_STREAM_HEADERS,
     )
+
+
+def _local_stream(conv_id: str, message: str, reason: str):
+    """Emit a guard-authored reply with no retrieval and no Gemini call."""
+    yield json.dumps({"type": "meta", "conversationId": conv_id}) + "\n"
+    yield json.dumps({"type": "token", "text": message}) + "\n"
+    db = SessionLocal()
+    try:
+        _persist_assistant(db, conv_id, message, "complete", False, [], [], [])
+    finally:
+        db.close()
+    yield json.dumps(
+        {"type": "done", "status": "complete", "stopped": False, "guard": reason}
+    ) + "\n"
+
+
+def _cached_stream(conv_id: str, hit: dict):
+    """Replay a previously verified answer + citations for the same question."""
+    quotes = hit.get("quotes", [])
+    unverified = hit.get("unverified", [])
+    coverage = hit.get("coverage", [])
+    answer = hit.get("answer", "")
+    yield json.dumps(
+        {"type": "meta", "conversationId": conv_id, "cached": True}
+    ) + "\n"
+    if quotes or unverified:
+        yield json.dumps(
+            {"type": "quotes", "quotes": quotes, "unverified": unverified}
+        ) + "\n"
+    if coverage:
+        yield json.dumps({"type": "coverage", "coverage": coverage}) + "\n"
+    yield json.dumps({"type": "token", "text": answer}) + "\n"
+    db = SessionLocal()
+    try:
+        _persist_assistant(
+            db, conv_id, answer, "complete", False, coverage, quotes, unverified
+        )
+    finally:
+        db.close()
+    yield json.dumps(
+        {"type": "done", "status": "complete", "stopped": False, "cached": True}
+    ) + "\n"
 
 
 def _persist_assistant(
