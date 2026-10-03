@@ -1,6 +1,6 @@
 "use client";
 
-import { Check, ChevronDown, ChevronsUpDown, CircleAlert, CircleX, FileText, LoaderCircle, Minus, Plus, RefreshCw, SearchX, Trash2 } from "lucide-react";
+import { Check, ChevronDown, ChevronLeft, ChevronRight, ChevronsUpDown, CircleAlert, CircleX, FileText, LoaderCircle, Minus, Plus, RefreshCw, SearchX, Trash2 } from "lucide-react";
 import Link from "next/link";
 import { useMemo, useState } from "react";
 import { mutate as globalMutate } from "swr";
@@ -52,6 +52,7 @@ function DownloadGlyph({ className }: { className?: string }) {
 }
 
 const SECTION_LABEL = "text-[11px] font-semibold uppercase tracking-[0.08em] text-ink";
+const SESSIONS_PER_PAGE = 8;
 
 export function RedlineView() {
   const { toast } = useToast();
@@ -70,12 +71,16 @@ export function RedlineView() {
   const [draftId, setDraftId] = useState<string | null>(null);
   const [applying, setApplying] = useState(false);
   const [expanded, setExpanded] = useState<string | null>(null);
+  const [sessionPage, setSessionPage] = useState(0);
   const [deleteId, setDeleteId] = useState<string | null>(null);
   const [deleting, setDeleting] = useState(false);
 
   const busy = phase.kind === "proposing" || applying;
   const doc = docxDocs.find((d) => d.id === docId) ?? null;
   const sessions = sessionsQ.data ?? [];
+  const sessionPages = Math.max(1, Math.ceil(sessions.length / SESSIONS_PER_PAGE));
+  const safeSessionPage = Math.min(sessionPage, sessionPages - 1);
+  const pageSessions = sessions.slice(safeSessionPage * SESSIONS_PER_PAGE, safeSessionPage * SESSIONS_PER_PAGE + SESSIONS_PER_PAGE);
   const shownAuthor = author.trim() || "Verbatim AI";
 
   async function propose() {
@@ -209,9 +214,9 @@ export function RedlineView() {
 
         {doc ? (
           <Button asChild>
-            <a href={`${API_BASE}/api/documents/${doc.id}/file`} download={doc.name}>
+            <Link href={`/documents/${doc.id}`}>
               <Icon name="eye" /> View Word
-            </a>
+            </Link>
           </Button>
         ) : (
           <Button disabled>
@@ -220,9 +225,9 @@ export function RedlineView() {
         )}
         {doc ? (
           <Button asChild>
-            <Link href={`/documents/${doc.id}`}>
+            <a href={`${API_BASE}/api/documents/${doc.id}/file`} target="_blank" rel="noopener noreferrer">
               <Icon name="docLines" /> View PDF
-            </Link>
+            </a>
           </Button>
         ) : (
           <Button disabled>
@@ -496,8 +501,9 @@ export function RedlineView() {
           ) : sessions.length === 0 ? (
             <EmptyState icon={FileText} title="No sessions yet" hint="Applied redlines are kept here." />
           ) : (
+            <>
             <ul className="space-y-2">
-              {sessions.map((s) => {
+              {pageSessions.map((s) => {
                 const st = sessionStatus(s);
                 const open = expanded === s.id;
                 return (
@@ -554,6 +560,20 @@ export function RedlineView() {
                 );
               })}
             </ul>
+            {sessionPages > 1 ? (
+              <div className="mt-3 flex items-center justify-between gap-2">
+                <Button size="sm" variant="outline" disabled={safeSessionPage === 0} onClick={() => { setSessionPage(safeSessionPage - 1); setExpanded(null); }}>
+                  <ChevronLeft /> Prev
+                </Button>
+                <span className="text-xs text-ink-subtle tabular-nums">
+                  Page {safeSessionPage + 1} of {sessionPages} · {sessions.length} session{sessions.length === 1 ? "" : "s"}
+                </span>
+                <Button size="sm" variant="outline" disabled={safeSessionPage >= sessionPages - 1} onClick={() => { setSessionPage(safeSessionPage + 1); setExpanded(null); }}>
+                  Next <ChevronRight />
+                </Button>
+              </div>
+            ) : null}
+            </>
           )}
         </div>
       </section>

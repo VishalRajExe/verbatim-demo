@@ -27,7 +27,9 @@ from app.services.qa.coverage import DocumentCoverage, caveat, not_found_message
 from app.services.qa.intent import (
     focus_hits,
     parse_page_constraints,
+    relevant_to_group,
     specific_keywords,
+    subquestion_page_parts,
 )
 from app.services.qa.prompts import compose_prompt, extract_prompt
 
@@ -36,6 +38,17 @@ from app.services.qa.prompts import compose_prompt, extract_prompt
 # (deterministic word-overlap ranking, original order as tie-break) so answers
 # stay focused and the prompt stays bounded.
 _MAX_COMPOSE_QUOTES = 24
+
+# Broad (unpage-constrained) questions on large documents used to be handed to
+# the extractor in a single ~96k-char megachunk. The model then returned an
+# inconsistent, partial subset of the relevant sentences - e.g. an incident
+# timeline split across two pages would come back with one page's wording and
+# silently drop the other page's deadline. Extraction recall is far more
+# complete when each call sees a window small enough to attend to fully, so the
+# broad path chunks tighter while still covering every page (coverage stays
+# honest; we are not reading MORE text, just reading the same text in more
+# attendable windows). Small documents still fit in a single chunk unchanged.
+_BROAD_CHUNK_CHARS = 12000
 
 
 def _rank_quotes(verified: list[dict], question: str) -> list[dict]:
@@ -87,10 +100,30 @@ def ask_stream(
     # verification is deliberately serial because a SQLAlchemy Session is not
     # thread-safe (I-1..I-7 hold unchanged). Plan order is preserved so Q1..Qn
     # numbering is stable regardless of the order chunks finish in.
+    # A page reference narrows READING only when every substantive part of the
+    # question is page-scoped. In a compound question ("the token on page 4,
+    # AND the liability cap in the other document") the second part names no
+    # page; restricting extraction to page 4 would never even read the other
+    # document's liability clause. When any part is page-free we read broadly
+    # and let the per-part page scoping in the relevance gate below keep the
+    # page-specific evidence precise. Pure single-page questions still take the
+    # fast, pollution-free narrowed path.
+    parts = subquestion_page_parts(question)
+    term_parts = [(t, p) for (t, p) in parts if t]
+    has_page_free_part = len(term_parts) >= 2 and any(not p for _t, p in term_parts)
+    narrow_to_pages = bool(page_constraints) and not has_page_free_part
+
     plan: list[dict] = []
     for doc in documents:
         canonical, page_ranges, _ = _canonical(db, doc)
+        # Does ANY selected document actually contain a referenced page? This
+        # is independent of how we choose chunks to read, so the not-found
+        # wording stays truthful whether we narrowed by page or read broadly.
         if page_constraints:
+            page_found = page_found or any(
+                pr.page_number in page_constraints for pr in page_ranges
+            )
+        if narrow_to_pages:
             # Read ONLY the requested page(s) of EACH document: the page's own
             # canonical span becomes the extraction unit. A document without
             # that page contributes nothing (per-document page attribution).
@@ -99,13 +132,12 @@ def ask_stream(
                 for pr in page_ranges
                 if pr.page_number in page_constraints
             ]
-            page_found = page_found or bool(spans)
             chunks = [
                 Chunk(text=canonical[s:e], start=s, end=e, index=i)
                 for i, (s, e) in enumerate(spans)
             ]
         else:
-            chunks = chunk_text(canonical) or []
+            chunks = chunk_text(canonical, max_chars=_BROAD_CHUNK_CHARS) or []
         cov = DocumentCoverage(
             document_id=doc.id, name=doc.filename,
             chunks_total=len(chunks), chunks_read=0, pages=doc.page_count or 0,
@@ -182,24 +214,54 @@ def ask_stream(
     # Relevance is a SEPARATE gate from verification: a quote that exists in
     # the document still must belong to the requested page(s) and must speak
     # to the question's substantive terms. Verified-but-irrelevant evidence
-    # never reaches ranking or composition.
-    if page_constraints:
-        verified = [
-            v for v in verified
-            if page_constraints & set(range(v["pageStart"], v["pageEnd"] + 1))
-        ]
-    if focus_terms:
-        # A quote that matches NONE of the question's substantive terms
-        # answers nothing asked; it never reaches composition, even when the
-        # question offers too few terms to justify the harder floor below.
-        verified = [v for v in verified if focus_hits(v["text"], focus_terms) >= 1]
-    if focus_terms and (page_constraints or len(focus_terms) >= 3):
-        # Two distinct term matches when the question offers them; a single
-        # term question ("reference value") is satisfied by one match.
-        need = min(2, len(focus_terms))
-        verified = [
-            v for v in verified if focus_hits(v["text"], focus_terms) >= need
-        ]
+    # never reaches ranking or composition. (``parts``/``term_parts`` were
+    # derived above and drive both the read-narrowing and this gate.)
+    if len(term_parts) >= 2:
+        # Compound question ("the token on page 4, AND the liability cap in the
+        # other document"). Judge each quote against the sub-question it
+        # actually answers, and scope any page reference to THAT part alone -
+        # a global page filter would starve a part that named no page (the
+        # other document's page-1 liability clause vanished behind "page 4").
+        # A quote survives if it is relevant to some part AND, when that part
+        # cites pages, it sits on one of them.
+        keep: list[dict] = []
+        for v in verified:
+            vpages = set(range(v["pageStart"], v["pageEnd"] + 1))
+            for terms, pages in term_parts:
+                if not relevant_to_group(v["text"], terms):
+                    continue
+                if pages and not (pages & vpages):
+                    continue
+                keep.append(v)
+                break
+        verified = keep if keep else verified
+    else:
+        if page_constraints:
+            verified = [
+                v for v in verified
+                if page_constraints & set(range(v["pageStart"], v["pageEnd"] + 1))
+            ]
+        if focus_terms:
+            # A quote that matches NONE of the question's substantive terms
+            # answers nothing asked; it never reaches composition, even when the
+            # question offers too few terms to justify the harder floor below.
+            verified = [v for v in verified if focus_hits(v["text"], focus_terms) >= 1]
+        if focus_terms and page_constraints:
+            # Two distinct term matches when the question offers them; a single
+            # term question ("reference value") is satisfied by one match. Page
+            # questions keep the union floor: it is what discards boilerplate
+            # that merely repeats one framing word off the page marker.
+            need = min(2, len(focus_terms))
+            verified = [
+                v for v in verified if focus_hits(v["text"], focus_terms) >= need
+            ]
+        elif focus_terms and len(focus_terms) >= 3:
+            # Single sentence but several topics; keep the union floor of two
+            # term matches.
+            need = min(2, len(focus_terms))
+            verified = [
+                v for v in verified if focus_hits(v["text"], focus_terms) >= need
+            ]
 
     # Number verified quotes and emit the quote + coverage events.
     verified = _rank_quotes(verified, question)

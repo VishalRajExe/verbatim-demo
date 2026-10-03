@@ -23,6 +23,12 @@ def extract_prompt(document_name: str, question: str, chunk_text: str) -> str:
         "question. Rules:\n"
         "- Copy text EXACTLY as written; do not paraphrase, fix typos, or change case.\n"
         "- Each quote is 1 to 3 contiguous sentences, no ellipses.\n"
+        "- Return EVERY passage in this section that helps answer the question, not "
+        "just the single most prominent one; a complete answer often needs a "
+        "secondary detail (a deadline, a figure, a cross-reference) as well as the "
+        "headline clause.\n"
+        "- If the question asks several things, extract evidence for EACH part "
+        "separately; never answer only its first or most obvious part.\n"
         "- Do NOT invent page numbers or positions; only return the quoted text.\n"
         "- If nothing in this section helps, return an empty list.\n"
         "- Respond ONLY with JSON of the form "
@@ -36,16 +42,24 @@ def compose_prompt(question: str, verified_quotes: list[dict], multi: bool) -> s
     for q in verified_quotes:
         label = f"{q['ref']}"
         doc = q.get("documentName") or "the document"
+        # Surface the authoritative page (resolved server-side from the verified
+        # range) so the model never has to guess a location: give it the real
+        # page rather than forbidding it from naming one.
+        ps, pe = q.get("pageStart"), q.get("pageEnd")
+        loc = ""
+        if isinstance(ps, int):
+            loc = f", page {ps}" if ps == pe else f", pages {ps}-{pe}"
         # Flatten PDF line-wrap newlines so each quote stays on one line.
         text = " ".join((q["text"] or "").split())
-        lines.append(f"[{label}] ({doc}): {text}")
+        lines.append(f"[{label}] ({doc}{loc}): {text}")
     quotes_block = "\n".join(lines)
 
     base = (
         "Answer the question using ONLY the verified quotes below. "
         "Cite the quotes you rely on with their [Q#] markers, like [Q1]. "
         "Do not put quotation marks around reproduced text and do not invent facts "
-        "beyond the quotes. If the quotes do not answer the question, say so plainly.\n"
+        "beyond the quotes. When you mention a page, use only the page shown for "
+        "that quote. If the quotes do not answer the question, say so plainly.\n"
     )
     if multi:
         base += (

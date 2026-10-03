@@ -65,7 +65,7 @@ export function ChatWorkspace() {
   const [live, setLive] = useState<Live | null>(null);
   const [openQuote, setOpenQuote] = useState<Quote | null>(null);
   const [historyOpen, setHistoryOpen] = useState(false);
-  const [deleteId, setDeleteId] = useState<string | null>(null);
+  const [deleteIds, setDeleteIds] = useState<string[] | null>(null);
   const [deleting, setDeleting] = useState(false);
 
   const liveRef = useRef<Live | null>(null);
@@ -196,14 +196,14 @@ export function ChatWorkspace() {
   }
 
   async function confirmDelete() {
-    if (!deleteId) return;
+    if (!deleteIds || deleteIds.length === 0) return;
     setDeleting(true);
     try {
-      await deleteChat(deleteId);
-      if (deleteId === chatId) router.replace("/chats", { scroll: false });
+      await Promise.all(deleteIds.map((id) => deleteChat(id)));
+      if (chatId && deleteIds.includes(chatId)) router.replace("/chats", { scroll: false });
       await chatsQ.mutate();
-      toast("Chat deleted", "success");
-      setDeleteId(null);
+      toast(deleteIds.length === 1 ? "Chat deleted" : `${deleteIds.length} chats deleted`, "success");
+      setDeleteIds(null);
     } catch {
       toast("Couldn't delete. Try again.", "error");
     } finally {
@@ -227,7 +227,7 @@ export function ChatWorkspace() {
       onRetry={() => void chatsQ.mutate()}
       activeId={chatId}
       onNew={newChat}
-      onDelete={setDeleteId}
+      onDeleteIds={setDeleteIds}
       onNavigate={onNavigate}
     />
   );
@@ -337,10 +337,10 @@ export function ChatWorkspace() {
       </Dialog>
 
       <ConfirmDialog
-        open={deleteId !== null}
-        onOpenChange={(o) => (o ? undefined : setDeleteId(null))}
-        title="Delete this chat?"
-        description="The conversation and its quotes will be removed."
+        open={deleteIds !== null}
+        onOpenChange={(o) => (o ? undefined : setDeleteIds(null))}
+        title={deleteIds && deleteIds.length > 1 ? `Delete ${deleteIds.length} chats?` : "Delete this chat?"}
+        description={deleteIds && deleteIds.length > 1 ? "The selected conversations and their quotes will be removed." : "The conversation and its quotes will be removed."}
         busy={deleting}
         onConfirm={() => void confirmDelete()}
       />

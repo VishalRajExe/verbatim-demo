@@ -11,6 +11,12 @@ export function AppShell({ children }: { children: ReactNode }) {
   const [navOpen, setNavOpen] = useState(false);
   return (
     <div className="flex h-dvh bg-canvas text-ink">
+      <a
+        href="#main-content"
+        className="sr-only focus:not-sr-only focus:fixed focus:left-3 focus:top-3 focus:z-50 focus:rounded-md focus:border focus:border-line focus:bg-surface focus:px-3 focus:py-2 focus:text-sm focus:font-semibold focus:text-ink"
+      >
+        Skip to content
+      </a>
       <aside className="hidden w-60 shrink-0 flex-col border-r border-line bg-surface lg:flex">
         <div className="px-4 py-4">
           <Brand />
@@ -24,7 +30,7 @@ export function AppShell({ children }: { children: ReactNode }) {
           <BrandMark className="size-6" />
           <span className="text-sm font-semibold">Verbatim</span>
         </header>
-        <main className="relative min-h-0 flex-1">{children}</main>
+        <main id="main-content" className="relative min-h-0 flex-1">{children}</main>
       </div>
 
       <Dialog open={navOpen} onOpenChange={setNavOpen}>
