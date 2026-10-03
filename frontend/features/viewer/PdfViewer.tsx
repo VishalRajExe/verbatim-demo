@@ -30,12 +30,16 @@ export function PdfViewer({ docId, ranges = [], className = "" }: PdfViewerProps
   const containerRef = useRef<HTMLDivElement>(null);
 
   // Load the pdf.js engine + document bytes (browser-only; no SSR).
+  // Reset ALL viewer state whenever the document identity changes so a page
+  // from a previously-open document can never linger (document-scoped view).
   useEffect(() => {
     let cancelled = false;
     let doc: any = null;
     setError("");
     setPdfDoc(null);
     setHighlights({});
+    setNumPages(0);
+    setFlashPage(null);
     (async () => {
       try {
         const pdfjs = await import("pdfjs-dist");
@@ -136,7 +140,7 @@ export function PdfViewer({ docId, ranges = [], className = "" }: PdfViewerProps
       <div className="mx-auto flex flex-col items-center gap-4 p-4">
         {Array.from({ length: numPages }, (_, i) => i + 1).map((p) => (
           <PdfPage
-            key={p}
+            key={`${docId}-${p}`}
             pdfDoc={pdfDoc}
             pageNumber={p}
             containerRef={containerRef}

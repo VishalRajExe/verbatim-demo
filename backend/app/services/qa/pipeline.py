@@ -21,9 +21,14 @@ from app.core.config import get_settings
 from app.models.document import Document
 from app.services.ai.client import LLMClient
 from app.services.citations.service import verify_quote
-from app.services.qa.chunker import chunk_text
+from app.services.qa.chunker import Chunk, chunk_text
 from app.services.qa.cite_filter import CitationFilter
 from app.services.qa.coverage import DocumentCoverage, caveat, not_found_message
+from app.services.qa.intent import (
+    focus_hits,
+    parse_page_constraints,
+    specific_keywords,
+)
 from app.services.qa.prompts import compose_prompt, extract_prompt
 
 # On very large documents the extract phase can surface hundreds of verified
@@ -67,6 +72,16 @@ def ask_stream(
     unverified: list[dict] = []
     seen_ranges: set[tuple[str, int, int]] = set()
 
+    # Structured intent: an explicit "page N" reference is a real constraint,
+    # NOT just another keyword. Left unparsed it matches the "Page NN of M"
+    # marker on every page and pollutes the evidence set with unrelated ones.
+    page_constraints = parse_page_constraints(question)
+    # Topical terms drive the relevance floor below: always for
+    # page-constrained questions, and for keyword-rich general questions;
+    # open-ended ones ("key risks") intentionally stay broad.
+    focus_terms = specific_keywords(question)
+    page_found = False
+
     # ── EXTRACT ──────────────────────────────────────────────────────────────
     # Network-bound LLM extraction runs concurrently across chunks; the DB-backed
     # verification is deliberately serial because a SQLAlchemy Session is not
@@ -74,8 +89,23 @@ def ask_stream(
     # numbering is stable regardless of the order chunks finish in.
     plan: list[dict] = []
     for doc in documents:
-        canonical, _page_ranges, _ = _canonical(db, doc)
-        chunks = chunk_text(canonical) or []
+        canonical, page_ranges, _ = _canonical(db, doc)
+        if page_constraints:
+            # Read ONLY the requested page(s) of EACH document: the page's own
+            # canonical span becomes the extraction unit. A document without
+            # that page contributes nothing (per-document page attribution).
+            spans = [
+                (pr.start, pr.end)
+                for pr in page_ranges
+                if pr.page_number in page_constraints
+            ]
+            page_found = page_found or bool(spans)
+            chunks = [
+                Chunk(text=canonical[s:e], start=s, end=e, index=i)
+                for i, (s, e) in enumerate(spans)
+            ]
+        else:
+            chunks = chunk_text(canonical) or []
         cov = DocumentCoverage(
             document_id=doc.id, name=doc.filename,
             chunks_total=len(chunks), chunks_read=0, pages=doc.page_count or 0,
@@ -149,6 +179,23 @@ def ask_stream(
                     }
                 )
 
+    # Relevance is a SEPARATE gate from verification: a quote that exists in
+    # the document still must belong to the requested page(s) and must speak
+    # to the question's substantive terms. Verified-but-irrelevant evidence
+    # never reaches ranking or composition.
+    if page_constraints:
+        verified = [
+            v for v in verified
+            if page_constraints & set(range(v["pageStart"], v["pageEnd"] + 1))
+        ]
+    if focus_terms and (page_constraints or len(focus_terms) >= 3):
+        # Two distinct term matches when the question offers them; a single
+        # term question ("reference value") is satisfied by one match.
+        need = min(2, len(focus_terms))
+        verified = [
+            v for v in verified if focus_hits(v["text"], focus_terms) >= need
+        ]
+
     # Number verified quotes and emit the quote + coverage events.
     verified = _rank_quotes(verified, question)
     for i, v in enumerate(verified, start=1):
@@ -180,7 +227,16 @@ def ask_stream(
 
     if not verified:
         # Deterministic, no model call. Never invents content.
-        yield {"type": "token", "text": not_found_message(coverages)}
+        if page_constraints and not page_found:
+            pages_txt = " / ".join(f"page {p}" for p in sorted(page_constraints))
+            names = ", ".join(c.name for c in coverages)
+            msg = (
+                f"The selected document(s) ({names}) do not contain "
+                f"{pages_txt}, so there is nothing to cite there."
+            )
+            yield {"type": "token", "text": msg}
+        else:
+            yield {"type": "token", "text": not_found_message(coverages)}
         yield {"type": "done", "status": "complete", "stopped": False}
         return
 

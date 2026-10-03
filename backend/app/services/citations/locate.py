@@ -29,6 +29,21 @@ def locate_ranges(
     if doc is None:
         return []
 
+    # A canonical offset is only meaningful inside the document it came from.
+    # Reject any range that does not lie within THIS document's canonical text
+    # so a stale/foreign citation can never resolve to a page here (the caller
+    # must then show "source not found in this document" rather than opening a
+    # different document's page).
+    n = len(canonical)
+    in_bounds: list[tuple[int, int]] = []
+    for start, end in ranges:
+        if end <= start or start < 0 or end > n:
+            continue
+        in_bounds.append((start, end))
+    ranges = in_bounds
+    if not ranges:
+        return []
+
     results: list[dict] = []
     if doc.file_type == ".pdf":
         pdf = fitz.open(str(Path(doc.file_path)))

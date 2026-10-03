@@ -319,7 +319,11 @@ export function ChatView() {
       </div>
 
       {activeQuote && (
-        <QuotePanel quote={activeQuote} onClose={() => setActiveQuote(null)} />
+        <QuotePanel
+          key={`${activeQuote.documentId}#${activeQuote.ref}#${activeQuote.start}`}
+          quote={activeQuote}
+          onClose={() => setActiveQuote(null)}
+        />
       )}
     </div>
   );
@@ -429,30 +433,56 @@ function QuotePanel({
   const [pages, setPages] = useState<{ page_number: number; text: string }[]>([]);
   const [location, setLocation] = useState<string>("");
   const [loading, setLoading] = useState(true);
+  const [notFound, setNotFound] = useState(false);
 
   useEffect(() => {
     let alive = true;
     setLoading(true);
+    setNotFound(false);
+    setLocation("");
+    setPages([]);
     (async () => {
       try {
+        // 1. Load the CITATION'S OWN document (never the currently-open one).
         const res = await fetch(`${API_BASE}/api/documents/${quote.documentId}/pages`, {
           cache: "no-store",
         });
+        if (!res.ok) {
+          if (alive) setNotFound(true);
+          return;
+        }
         const data = await res.json();
-        if (alive) setPages(data.pages || []);
+        const docPages: { page_number: number; text: string }[] = data.pages || [];
+        if (alive) setPages(docPages);
+
+        // 2. Resolve the source range AGAINST THIS DOCUMENT ONLY.
         const loc = await locateRanges(quote.documentId, [
           { start: quote.start, end: quote.end },
         ]);
-        if (alive && loc.locations[0]) {
-          const l = loc.locations[0];
-          setLocation(
-            l.noGeometry
-              ? `Page ${l.pageNumber} (exact text position available; pixel geometry is PDF-only)`
-              : `Page ${l.pageNumber} · ${l.rects.length} line(s) matched`,
-          );
+        const locatedPages = (loc.locations || []).map((l) => l.pageNumber);
+
+        // 3. The cited page must actually exist in this document, and the range
+        //    must resolve to a page within it. Otherwise it is NOT found here —
+        //    we must never fall back to another document's page.
+        const pageExistsHere = docPages.some((p) => p.page_number === quote.pageStart);
+        const resolvedHere =
+          locatedPages.length > 0 &&
+          locatedPages.every((pg) => docPages.some((p) => p.page_number === pg));
+        const found = (pageExistsHere || resolvedHere) && locatedPages.length > 0;
+
+        if (!alive) return;
+        if (!found) {
+          setNotFound(true);
+          return;
         }
+        const l = loc.locations[0];
+        setLocation(
+          l.noGeometry
+            ? `Page ${l.pageNumber} (exact text position available; pixel geometry is PDF-only)`
+            : `Page ${l.pageNumber} · ${l.rects.length} line(s) matched`,
+        );
       } catch {
-        /* ignore */
+        if (alive) setNotFound(true);
       } finally {
         if (alive) setLoading(false);
       }
@@ -489,6 +519,17 @@ function QuotePanel({
           )}
         </div>
         <div className="flex-1 overflow-y-auto px-4 py-4">
+          {!loading && notFound ? (
+            <div className="mt-6 rounded-lg border border-amber-200 bg-amber-50 p-4 text-sm text-amber-800">
+              Source not found in this document.
+              <div className="mt-1 text-xs text-amber-700">
+                The cited passage could not be located in {quote.documentName} at
+                page {quote.pageStart}. It may belong to a different document, so
+                no other document was opened.
+              </div>
+            </div>
+          ) : (
+          <>
           {isPdf && (
             <div className="mb-4">
               <div className="mb-2 flex items-center justify-between">
@@ -527,6 +568,8 @@ function QuotePanel({
                 {highlight(pageText, quote.text)}
               </p>
             </>
+          )}
+          </>
           )}
         </div>
       </div>
