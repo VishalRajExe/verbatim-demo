@@ -188,6 +188,11 @@ def ask_stream(
             v for v in verified
             if page_constraints & set(range(v["pageStart"], v["pageEnd"] + 1))
         ]
+    if focus_terms:
+        # A quote that matches NONE of the question's substantive terms
+        # answers nothing asked; it never reaches composition, even when the
+        # question offers too few terms to justify the harder floor below.
+        verified = [v for v in verified if focus_hits(v["text"], focus_terms) >= 1]
     if focus_terms and (page_constraints or len(focus_terms) >= 3):
         # Two distinct term matches when the question offers them; a single
         # term question ("reference value") is satisfied by one match.

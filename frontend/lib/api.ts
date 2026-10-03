@@ -176,7 +176,7 @@ export async function listRedlines(documentId?: string): Promise<RedlineOut[]> {
 export async function createRedline(
   docId: string,
   body: {
-    edits: { target: string; replacement: string }[];
+    edits: { target: string; replacement: string; context?: string }[];
     author?: string;
     instruction?: string | null;
   },

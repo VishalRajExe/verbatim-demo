@@ -87,6 +87,10 @@ class MockClient:
             yield word
 
     def complete_json(self, prompt: str) -> dict | list | None:
+        # Local import: app.services.qa's package __init__ imports the pipeline,
+        # which imports this module — a top-level import would be circular.
+        from app.services.qa.intent import matches_term
+
         if "You propose MINIMAL tracked-change edits" in prompt:
             return self._propose_edits(prompt)
         q = _extract_field(prompt, "Question:")
@@ -118,7 +122,14 @@ class MockClient:
                 continue
             slo_s = s.lower()
             nums = {n.lstrip("0") or "0" for n in _NUMS_RE.findall(slo_s)}
-            hit = sum(1 for w in keywords if w in slo_s) + sum(
+            # Score with the product's own relevance definition (see
+            # app.services.qa.intent): an inflection of the question word
+            # "governs" finds "governed", "late" does NOT find "violate", and a
+            # quantity word ("percentage") is answered by a sentence carrying a
+            # real number. Raw substring equality here made answering clauses
+            # unreachable, and ranking without the numeric bridge let longer
+            # boilerplate outrank the sentence that actually answers.
+            hit = sum(1 for w in keywords if matches_term(slo_s, w)) + sum(
                 1 for n in numbers if n in nums
             )
             # Exact-page signal: "Page 87" marker lines and token identifiers
@@ -142,47 +153,206 @@ class MockClient:
         return out
 
     def _propose_edits(self, prompt: str) -> dict:
-        """Offline redline proposals: swap the instruction's from-value for the
-        to-value wherever the from-value literally appears in this section."""
+        """Offline redline proposals. Two kinds of instruction are understood:
+
+        * explicit "from X to Y" / "replace X with Y" -- swap the from-value for
+          the to-value, choosing the sentence that best matches the instruction's
+          concept so a value that repeats across clauses is disambiguated, and
+          returning that sentence as a verification anchor (``context``).
+        * semantic state instructions ("make the liability cap mutual") -- locate
+          the clause the concept points at and apply the matching generic
+          drafting operation to whatever that clause actually says.
+
+        In every case the returned ``target`` is copied verbatim from this
+        section; the caller re-verifies it against the authoritative DOCX."""
         from app.services.redlining.instructions import (
             extract_value_tokens,
+            find_similar_value,
+            make_mutual_edit,
             normalize_value,
             parse_instruction,
+            parse_semantic_instruction,
+        )
+        from app.services.qa.intent import (
+            focus_hits,
+            matches_word,
+            specific_keywords,
         )
 
         instruction = _extract_field(prompt, "Instruction:")
         data = _extract_chunk_data(prompt)
+        # Split on paragraph boundaries (newlines) first, then on sentence
+        # terminals within each line. A verification anchor must live inside one
+        # DOCX paragraph -- the deterministic checks match per paragraph -- so a
+        # heading line must never be glued onto the clause beneath it.
+        sentences = []
+        for line in data.splitlines():
+            for s in re.split(r"(?<=[.!?])\s+", line):
+                s = s.strip()
+                if s:
+                    sentences.append(s)
         edits = []
+
+        def lex_hits(sentence: str, kws: set[str]) -> int:
+            """Count concept words the sentence speaks to in WORDS, not merely in
+            digits.
+
+            ``matches_word`` covers inflection; a shared four-letter prefix adds
+            a light morphology bridge so "payment" reaches "pay" and "invoices"
+            stays distinct from a bare numeric period. The quantity<->digit
+            bridge in ``focus_hits`` is deliberately left out of this score: a
+            clause that only matches because it happens to contain a number is a
+            weaker locator than one that names the concept."""
+            words = re.findall(r"[a-z]+", sentence.lower())
+            total = 0
+            for term in kws:
+                if matches_word(sentence, term):
+                    total += 1
+                    continue
+                t = term[:4]
+                if any(len(w) >= 3 and (w.startswith(t) or term.startswith(w[:4])) for w in words):
+                    total += 1
+            return total
+
+        def clause_key(sentence: str, kws: set[str]) -> tuple:
+            """Ranking key: real-word concept match first, then the broad
+            relevance score (so numeric-only clauses still rank), then the more
+            substantive (longer) sentence -- so a short heading loses to the
+            clause beneath it."""
+            return (
+                -lex_hits(sentence, kws),
+                -(focus_hits(sentence, kws) if kws else 0),
+                -len(sentence),
+            )
+
+        def nearest_concept_distance(sentence: str, target: str, kws: set[str]) -> int:
+            """Characters between ``target`` and the closest concept word in the
+            sentence (huge if none). A value that repeats across clauses is most
+            likely meant by the clause whose wording sits right next to it."""
+            low = sentence.lower()
+            tpos = low.find(target.lower())
+            if tpos < 0:
+                return 10**9
+            best = 10**9
+            for m in re.finditer(r"[a-z]+", low):
+                w = m.group(0)
+                for term in kws:
+                    if matches_word(w, term) or (
+                        len(w) >= 3 and (w.startswith(term[:4]) or term.startswith(w[:4]))
+                    ):
+                        best = min(best, abs(m.start() - tpos))
+                        break
+            return best
+
+        def rank_clauses(concept: str) -> list[str]:
+            """Sentences matching ``concept``, best first; those with no signal
+            at all are excluded."""
+            kws = specific_keywords(concept or instruction)
+            if not kws:
+                return []
+            ranked = sorted(sentences, key=lambda s: clause_key(s, kws))
+            return [s for s in ranked if lex_hits(s, kws) or focus_hits(s, kws)]
+
+        def anchor_for(target: str, concept: str) -> str:
+            """The sentence containing ``target`` that best matches ``concept``.
+
+            Ordering puts the real-word concept match first, then the distance
+            from the value to that concept word (so "change the payment terms
+            from 30 days" picks the clause that talks about paying near the
+            figure, not another clause that merely also contains "30 days"),
+            then the broader relevance score, then substance."""
+            kws = specific_keywords(concept or instruction)
+            want = normalize_value(target)
+            candidates = [s for s in sentences if not want or want in normalize_value(s)]
+            if not candidates:
+                return ""
+            if not kws:
+                return candidates[0]
+            return min(
+                candidates,
+                key=lambda s: (
+                    -lex_hits(s, kws),
+                    nearest_concept_distance(s, target, kws),
+                    -(focus_hits(s, kws) if kws else 0),
+                    -len(s),
+                ),
+            )
+
+        # ── Type A: explicit from/to, or "change <concept> to <value>" ────────
         for intent in parse_instruction(instruction):
-            expected = intent.expected_original
-            if not expected or not intent.new_value:
+            new_value = intent.new_value
+            if not new_value:
                 continue
-            want = normalize_value(expected)
-            for tok in extract_value_tokens(data):
-                if normalize_value(tok) == want:
+            expected = intent.expected_original
+            if expected:
+                want = normalize_value(expected)
+                target = None
+                for tok in extract_value_tokens(data):
+                    if normalize_value(tok) == want:
+                        target = tok
+                        break
+                if target is None:
+                    # Non-numeric phrase: locate it whitespace-tolerantly.
+                    pattern = re.compile(
+                        r"\s+".join(re.escape(w) for w in expected.split()), re.IGNORECASE
+                    )
+                    m = pattern.search(data)
+                    target = m.group(0) if m else None
+                if target:
                     edits.append(
                         {
-                            "target": tok,
-                            "replacement": intent.new_value,
+                            "target": target,
+                            "replacement": new_value,
                             "reason": "mock value swap",
+                            "context": anchor_for(target, intent.concept or instruction),
                         }
                     )
+            elif intent.concept:
+                # No literal original: find the clause by concept and replace the
+                # value already sitting in it ("change the payment period to 60
+                # days" -> the 30 days in the payment clause becomes 60 days).
+                # Walk the concept-matched clauses best-first and stop at the
+                # first that actually states a value, so a clause that merely
+                # mentions the concept word ("subject to payment of fees") without
+                # a figure never shadows the clause that does.
+                for clause in rank_clauses(intent.concept):
+                    existing = find_similar_value(clause, new_value, set())
+                    if existing:
+                        edits.append(
+                            {
+                                "target": existing,
+                                "replacement": new_value,
+                                "reason": "mock value swap",
+                                "context": clause,
+                            }
+                        )
+                        break
+
+        # ── Type B: semantic state change (no literal from/to) ────────────────
+        for sintent in parse_semantic_instruction(instruction):
+            if sintent.operation != "make_mutual":
+                continue
+            # Walk the concept-matched clauses best-first and take the first one
+            # that is actually one-sided; this skips section headings and clauses
+            # that are already mutual rather than fabricating an edit.
+            result = None
+            clause = ""
+            for candidate in rank_clauses(sintent.concept):
+                found = make_mutual_edit(candidate)
+                if found:
+                    result, clause = found, candidate
                     break
-            else:
-                # Non-numeric target: locate the phrase itself, whitespace-
-                # tolerant, and copy the raw text as the verbatim target.
-                pattern = re.compile(
-                    r"\s+".join(re.escape(w) for w in expected.split()), re.IGNORECASE
-                )
-                m = pattern.search(data)
-                if m:
-                    edits.append(
-                        {
-                            "target": m.group(0),
-                            "replacement": intent.new_value,
-                            "reason": "mock phrase swap",
-                        }
-                    )
+            if not result:
+                continue
+            target, replacement = result
+            edits.append(
+                {
+                    "target": target,
+                    "replacement": replacement,
+                    "reason": "Extend the provision to apply to both parties.",
+                    "context": clause,
+                }
+            )
         return {"edits": edits}
 
 

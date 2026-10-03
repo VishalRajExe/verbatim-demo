@@ -106,5 +106,65 @@ def test_stats_and_summary_present():
     assert result["summarySource"] == "automatic"
 
 
+# ── regressions: clause segmentation must not be line-layout-sensitive ───────
+
+def test_wrapped_quantity_lines_are_not_clauses():
+    # Bug #9: any line beginning with a digit was treated as a legal numbering
+    # marker. A re-wrapped sentence ("90 days after delivery, ...") or a table
+    # cell ("60 days") therefore became a phantom clause, and a mere re-layout of
+    # a document surfaced those fragments as clauses ADDED / REMOVED.
+    text = (
+        "6. WARRANTIES\nSupplier warrants the services.\n"
+        "90 days after delivery, Supplier will correct material non-conformities.\n\n"
+        "7. SERVICE LEVELS\nMetric Value\nReview period 60 days\nEscalation 24 hours"
+    )
+    numbers = [c.number for c in split_clauses(text)]
+    assert "90" not in numbers and "60" not in numbers and "24" not in numbers
+    assert "6" in numbers and "7" in numbers
+
+    # A single quantity at a line start must not create an ADDED/REMOVED pair.
+    a = "8. LIABILITY\nEach party's liability will not exceed AED 100,000 in respect\nof claims arising in the term.\n"
+    b = "8. LIABILITY\nEach party's liability will not exceed AED 100,000\nin respect of claims arising in the term.\n"
+    types = {c["type"] for c in comparison_result(a, b)["changes"]}
+    assert "ADDED" not in types and "REMOVED" not in types
+
+
+def test_word_marker_needs_a_label_not_an_ordinary_word():
+    # "Schedule 2" / "Exhibit B" are headings; a wrapped line that happens to
+    # start with "schedule adjustments." is prose.
+    # The prose line must be wrapped so it STARTS at the marker word: that is the
+    # only position a line-anchored numbering pattern can be fooled by.
+    text = "1. SCOPE\nThe parties may agree\nschedule adjustments. at any time.\n"
+    assert [c.number for c in split_clauses(text)] == ["1"]
+    labelled = "Schedule 2\nThe delivery obligations are set out there."
+    assert split_clauses(labelled)[0].number == "Schedule 2"
+
+
+def test_short_periods_are_material_and_same_unit_values_are_not_collapsed():
+    # Bug #10: the quantity vocabulary stopped at days/months/years, so an
+    # incident-notification window cut from 48 hours to 24 hours was invisible;
+    # and quantities were stored one-per-unit, so a clause stating two periods
+    # let the second silently overwrite the first.
+    m = floor_significance(
+        "Supplier shall notify within 48 hours after confirmation.",
+        "Supplier shall notify within 24 hours after confirmation.",
+    )
+    assert m.changed_tokens, "a halved notification window is a real change"
+    assert any("hours" in t and "48" in t and "24" in t for t in m.changed_tokens)
+
+    m2 = floor_significance(
+        "Cure within 30 days; terminate on 15 days notice; audit every 90 days.",
+        "Cure within 30 days; terminate on 15 days notice; audit every 60 days.",
+    )
+    assert m2.changed_tokens and any("60" in t and "90" in t for t in m2.changed_tokens)
+
+    # Reordering equal values must not look like a change.
+    same = floor_significance(
+        "Cure within 30 days; audit every 90 days.",
+        "Cure within 90 days; audit every 30 days.",
+    )
+    assert not any("days" in t for t in same.changed_tokens)
+
+
 if __name__ == "__main__":  # pragma: no cover
     raise SystemExit(pytest.main([__file__, "-q"]))

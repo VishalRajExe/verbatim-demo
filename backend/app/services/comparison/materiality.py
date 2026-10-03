@@ -17,8 +17,14 @@ CURRENCY = r"(?:AED|USD|EUR|GBP|SAR|QAR|KWD|OMR|BHD|JOD|Dhs)"
 _MONEY_PRE = re.compile(CURRENCY + r"\s*([\d][\d,]*(?:\.\d+)?)", re.IGNORECASE)
 _MONEY_POST = re.compile(r"([\d][\d,]*(?:\.\d+)?)\s*" + CURRENCY, re.IGNORECASE)
 _PERCENT = re.compile(r"(\d+(?:\.\d+)?)\s*%")
+# A quantity is a number followed by the unit it counts. Short periods (hours,
+# minutes) are exactly as material as days — a notification window tightened from
+# 48 to 24 hours is a real commercial change — so the unit vocabulary is not
+# limited to day/month/year, and the number may carry thousands separators or a
+# decimal part.
 _NUM_UNIT = re.compile(
-    r"(\d+)\s*(business days?|calendar days?|working days?|days?|months?|years?|weeks?)",
+    r"(\d[\d,]*(?:\.\d+)?)\s*(business days?|calendar days?|working days?|days?|"
+    r"hours?|minutes?|seconds?|months?|years?|weeks?|quarters?)",
     re.IGNORECASE,
 )
 _MODALS = re.compile(
@@ -36,7 +42,10 @@ def _amount(s: str) -> float:
 class Tokens:
     money: dict[str, float] = field(default_factory=dict)  # currency -> value
     percents: list[float] = field(default_factory=list)
-    num_units: dict[str, int] = field(default_factory=dict)  # unit -> value
+    # unit -> every value stated with that unit. A clause may state several
+    # periods of the same unit ("cured within 30 days ... on 15 days notice");
+    # keeping them as a list means one period cannot silently overwrite another.
+    num_units: dict[str, list[float]] = field(default_factory=dict)
     modals: set[str] = field(default_factory=set)
     negations: set[str] = field(default_factory=set)
     unlimited: bool = False
@@ -48,7 +57,9 @@ def extract_tokens(text: str) -> Tokens:
         t.money[cur.upper()] = val
     t.percents = sorted(float(p) for p in _PERCENT.findall(text))
     for n, unit in _NUM_UNIT.findall(text):
-        t.num_units[unit.lower().strip()] = int(n)
+        t.num_units.setdefault(unit.lower().strip(), []).append(_amount(n))
+    for unit in t.num_units:
+        t.num_units[unit].sort()
     t.modals = {m.lower() for m in _MODALS.findall(text)}
     t.negations = {n.lower() for n in _NEGATIONS.findall(text)}
     t.unlimited = bool(_UNLIMITED.search(text))
@@ -71,6 +82,11 @@ def _trailing_currency(text: str, end: int) -> str:
     tail = text[end:].lstrip()[:4]
     m = re.match(CURRENCY, tail, re.IGNORECASE)
     return m.group(0) if m else ""
+
+
+def _units(t: Tokens) -> dict[str, list[float]]:
+    """Quantity tokens compared as multisets per unit ("days": [15, 30])."""
+    return {u: sorted(v) for u, v in t.num_units.items()}
 
 
 def _changed_money(a: Tokens, b: Tokens) -> tuple[bool, float]:
@@ -113,10 +129,11 @@ def floor_significance(a_text: str, b_text: str) -> Materiality:
         changed.append(
             f"percentage {_fmt_list(ta.percents)} \u2192 {_fmt_list(tb.percents)}"
         )
-    if ta.num_units != tb.num_units:
+    if _units(ta) != _units(tb):
         for u in sorted(set(ta.num_units) | set(tb.num_units)):
-            if ta.num_units.get(u) != tb.num_units.get(u):
-                changed.append(f"{u}: {ta.num_units.get(u)} \u2192 {tb.num_units.get(u)}")
+            av, bv = ta.num_units.get(u, []), tb.num_units.get(u, [])
+            if av != bv:
+                changed.append(f"{u}: {_fmt_list(av)} \u2192 {_fmt_list(bv)}")
     if ta.modals != tb.modals:
         added = tb.modals - ta.modals
         removed = ta.modals - tb.modals

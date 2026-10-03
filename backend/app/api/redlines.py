@@ -92,7 +92,10 @@ def create_redline(
     doc = _ready_docx(db, doc_id)
     src = Path(doc.file_path)
 
-    edits = [Edit(target=e.target, replacement=e.replacement) for e in body.edits]
+    edits = [
+        Edit(target=e.target, replacement=e.replacement, context=e.context)
+        for e in body.edits
+    ]
     try:
         result = apply_redlines(src.read_bytes(), edits, author=body.author)
     except Exception as exc:  # noqa: BLE001 - surface a clean message
@@ -107,7 +110,14 @@ def create_redline(
         document_id=doc_id,
         author=body.author,
         instruction=body.instruction,
-        applied_json=[{"target": e.target, "replacement": e.replacement} for e in result.applied],
+        applied_json=[
+            {
+                "target": e.target,
+                "replacement": e.replacement,
+                "context": e.context,
+            }
+            for e in result.applied
+        ],
         dropped_json=result.dropped,
         insertions=result.insertions,
         deletions=result.deletions,

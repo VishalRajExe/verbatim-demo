@@ -5,6 +5,10 @@ against the document it belongs to. A range that is valid in a large document
 (Document B, "page 87") must NEVER resolve to a page in a smaller document
 (Document A, 4 pages) — it returns nothing, so the UI shows "source not found in
 this document" instead of opening the wrong document's page.
+
+It also pins the second half of that honesty rule: a document whose stored
+source file has disappeared must report THAT, not an empty location list and not
+an unhandled crash.
 """
 from __future__ import annotations
 
@@ -12,6 +16,8 @@ from pathlib import Path
 
 from fastapi.testclient import TestClient
 
+from app.db.session import SessionLocal
+from app.models.document import Document
 from tests.helpers import make_text_pdf
 
 API = "/api/documents"
@@ -107,4 +113,38 @@ def test_locate_rejects_out_of_bounds_and_malformed_ranges(
         assert r2.status_code == 200
         assert r2.json()["locations"] == []
     finally:
+        client.delete(f"{API}/{a_id}")
+
+
+def test_missing_source_file_is_reported_not_crashed(
+    client: TestClient, tmp_path: Path
+) -> None:
+    # Bug #8: a document row can outlive its stored file (repo moved, storage
+    # restored from another machine). The extracted text is still in the
+    # database, so /locate used to call PyMuPDF on a dead path and raise a raw
+    # FileNotFoundError -> HTTP 500. The browser then blamed CORS and the drawer
+    # claimed the verified citation was "not found in this document".
+    a_id = _ready(client, tmp_path / "a.pdf", "a.pdf", [A1, A2])
+    primary = _verify(client, a_id, A2)
+    db = SessionLocal()
+    try:
+        stored = Path(db.get(Document, a_id).file_path)
+    finally:
+        db.close()
+    stored.rename(stored.with_suffix(".gone"))  # file disappears, row survives
+    try:
+        located = client.get(
+            f"{API}/{a_id}/locate",
+            params={"ranges": f"{primary['start']}-{primary['end']}"},
+        )
+        assert located.status_code == 404, located.text
+        assert "Source file not found on storage" in located.text
+        # Same contract as the file endpoint, which already checked this.
+        assert client.get(f"{API}/{a_id}/file").status_code == 404
+        # Text-based retrieval is unaffected: the quote is still verifiable.
+        assert client.post(
+            f"{API}/{a_id}/verify", json={"quote": A2}
+        ).json()["verified"] is True
+    finally:
+        stored.with_suffix(".gone").rename(stored)
         client.delete(f"{API}/{a_id}")

@@ -39,6 +39,9 @@ class ProposedEdit:
     replacement: str
     reason: str = ""
     include: bool = True
+    context: str = ""      # verbatim anchor that pins a repeated target to one clause
+    occurrences: int = 1   # how many times the bare target occurs in the document
+    verified: bool = True
 
 
 @dataclass
@@ -56,6 +59,9 @@ class ProposeResult:
                     "replacement": e.replacement,
                     "reason": e.reason,
                     "include": e.include,
+                    "context": e.context,
+                    "occurrences": e.occurrences,
+                    "verified": e.verified,
                 }
                 for e in self.proposed
             ],
@@ -114,11 +120,17 @@ def propose_redline(
             if isinstance(e, dict):
                 raw_edits.append(e)
 
-    seen: set[str] = set()
+    seen: set[tuple[str, str]] = set()
     for e in raw_edits:
         target = (e.get("target") or "").strip()
         replacement = (e.get("replacement") or "").strip()
         reason = (e.get("reason") or "").strip()
+        context = (e.get("context") or "").strip()
+        if not context:
+            before = (e.get("contextBefore") or "").strip()
+            after = (e.get("contextAfter") or "").strip()
+            if before or after:
+                context = f"{before}{target}{after}".strip()
         if not target:
             continue
 
@@ -136,16 +148,26 @@ def propose_redline(
                 }
             )
             continue
+
+        # A value that repeats across clauses (e.g. the same figure in the fee
+        # clause and the liability clause) is only safe to edit when a verbatim
+        # surrounding passage pins exactly one occurrence. That anchor is itself
+        # re-verified to be unique; without it the edit stays ambiguous and is
+        # dropped rather than guessed (never the first match).
+        resolved_context = ""
         if occ > 1:
-            result.dropped.append(
-                {
-                    "target": target,
-                    "reason": "The target text appears more than once, so the "
-                    "edit is ambiguous. Nothing was changed.",
-                }
-            )
-            continue
-        if target in seen:
+            if context and count_occurrences(document, context) == 1:
+                resolved_context = context
+            else:
+                result.dropped.append(
+                    {
+                        "target": target,
+                        "reason": "The target text appears more than once, so the "
+                        "edit is ambiguous. Nothing was changed.",
+                    }
+                )
+                continue
+        if (target, resolved_context) in seen:
             result.dropped.append(
                 {"target": target, "reason": "Duplicate of an earlier proposal."}
             )
@@ -168,19 +190,30 @@ def propose_redline(
                 }
             )
             continue
-        seen.add(target)
+        seen.add((target, resolved_context))
         result.proposed.append(
-            ProposedEdit(target=target, replacement=replacement, reason=reason)
+            ProposedEdit(
+                target=target,
+                replacement=replacement,
+                reason=reason,
+                context=resolved_context,
+                occurrences=occ,
+                verified=True,
+            )
         )
 
     if not result.proposed and not result.dropped:
-        result.dropped.append(
-            {
-                "target": trimmed,
-                "reason": "No exact match for the requested change was found in "
-                "the document. Nothing was proposed.",
-            }
-        )
+        if intents or any(i.new_value for i in intents):
+            reason = (
+                "No exact match for the requested change was found in the "
+                "document. Nothing was proposed."
+            )
+        else:
+            reason = (
+                "No clause clearly matching the requested change was found, or it "
+                "already satisfies the instruction. Nothing was proposed."
+            )
+        result.dropped.append({"target": trimmed, "reason": reason})
     return result
 
 

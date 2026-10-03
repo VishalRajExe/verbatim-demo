@@ -103,6 +103,27 @@ def test_parser_reads_multiple_changes():
     assert any(i.expected_original and "England" in i.expected_original for i in intents)
 
 
+def test_parser_splits_commands_joined_by_and_without_a_comma():
+    # Bug #11: a compound instruction like "change A to B and change C to D"
+    # (no comma before the conjunction) used to parse as ONE intent: the value
+    # capture only stopped at a comma+verb, so the second edit was swallowed
+    # and silently never proposed.
+    from app.services.redlining.instructions import parse_instruction
+
+    intents = parse_instruction(
+        "Change 45 days to 60 days and change 15 days to 30 days."
+    )
+    pairs = {(i.expected_original, i.new_value) for i in intents}
+    assert pairs == {("45 days", "60 days"), ("15 days", "30 days")}
+
+    # An ordinary "and" inside a value must never split an intent.
+    intents = parse_instruction(
+        "replace the laws of England and Wales with the laws of France"
+    )
+    assert len(intents) == 1
+    assert intents[0].expected_original == "laws of England and Wales"
+
+
 def test_parser_keeps_decimal_values_intact():
     from app.services.redlining.instructions import parse_instruction
 
@@ -185,6 +206,27 @@ def test_multiple_changes_verified_independently(client, client_app, tmp_path):
         assert len(out["proposed"]) == 3
         targets = {e["target"] for e in out["proposed"]}
         assert targets == {"AED 100,000", "30 days", "laws of England and Wales"}
+        assert out["dropped"] == []
+    finally:
+        client.delete(f"{API}/{doc_id}")
+
+
+def test_two_changes_joined_by_and_are_both_proposed(client, client_app, tmp_path):
+    # Bug #11 end-to-end: two changes joined by "and" (no comma) in one
+    # instruction must each produce their own verified proposal.
+    doc_id = _ready_docx(client, tmp_path, [CAP_P, PAY_P, LAW_P])
+    try:
+        _override(client_app, ScriptedLLM([
+            {"target": "AED 100,000", "replacement": "AED 1,000,000", "reason": "cap"},
+            {"target": "30 days", "replacement": "45 days", "reason": "terms"},
+        ]))
+        out = _propose(
+            client, doc_id,
+            "Change the liability cap from AED 100,000 to AED 1,000,000 "
+            "and change the payment term from 30 days to 45 days.",
+        )
+        targets = {e["target"] for e in out["proposed"]}
+        assert targets == {"AED 100,000", "30 days"}
         assert out["dropped"] == []
     finally:
         client.delete(f"{API}/{doc_id}")

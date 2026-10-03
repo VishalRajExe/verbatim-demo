@@ -92,6 +92,61 @@ def test_ask_unknown_document_404(client: TestClient):
         app.dependency_overrides.clear()
 
 
+def test_session_list_followup_and_reopen_persists(client: TestClient, tmp_path: Path):
+    """Sessions regression: a conversation must appear in the list exactly
+    once, follow-ups must append to the same conversation (not fork a new
+    one), and reopening by id must return every persisted, verified turn —
+    the API contract the UI relies on across browser refreshes."""
+    app.dependency_overrides[get_llm_dep] = lambda: MockClient()
+    doc_id = _upload_pdf(client, tmp_path, "s.pdf", [P1, P2])
+    conv_id = None
+    try:
+        r1 = client.post(
+            "/api/ask",
+            json={"documentIds": [doc_id], "question": "When must the Customer pay?"},
+        )
+        assert r1.status_code == 200
+        conv_id = _parse_ndjson(r1.text)[0]["conversationId"]
+
+        # The session is listed for the history rail.
+        listed = client.get("/api/conversations").json()
+        match = [c for c in listed if c["id"] == conv_id]
+        assert len(match) == 1, "conversation must appear exactly once in the list"
+
+        # A follow-up continues the SAME conversation, not a new one.
+        before = len(client.get("/api/conversations").json())
+        r2 = client.post(
+            "/api/ask",
+            json={
+                "documentIds": [doc_id],
+                "question": "What is the liability cap?",
+                "conversationId": conv_id,
+            },
+        )
+        assert r2.status_code == 200
+        meta2 = _parse_ndjson(r2.text)[0]
+        assert meta2["conversationId"] == conv_id
+        assert len(client.get("/api/conversations").json()) == before
+
+        # Reopen (simulates browser refresh + click on the old session).
+        detail = client.get(f"/api/conversations/{conv_id}").json()
+        roles = [m["role"] for m in detail["messages"]]
+        assert roles.count("user") == 2 and roles.count("assistant") == 2
+        assistants = [m for m in detail["messages"] if m["role"] == "assistant"]
+        assert all(m["content"].strip() for m in assistants)
+        # Reopened quotes keep document scoping: ids/pages are persisted.
+        for m in assistants:
+            for q in m["quotes"]:
+                if q["verified"]:
+                    assert q["documentId"] == doc_id
+                    assert q["pageStart"] >= 1
+    finally:
+        app.dependency_overrides.clear()
+        if conv_id:
+            client.delete(f"/api/conversations/{conv_id}")
+        client.delete(f"{DOC_API}/{doc_id}")
+
+
 # ── Comparisons ───────────────────────────────────────────────────────────────
 
 def test_create_and_read_comparison(client: TestClient, tmp_path: Path):

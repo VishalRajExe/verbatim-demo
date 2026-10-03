@@ -19,6 +19,8 @@ from app.models.document import Document
 from app.services.ai.client import MockClient
 from app.services.qa.intent import (
     focus_hits,
+    matches_term,
+    matches_word,
     parse_page_constraints,
     specific_keywords,
 )
@@ -34,6 +36,19 @@ P4 = "Financial baseline for the vendor program is AED 122,500 per quarter revie
 P5 = "Either party may terminate this agreement by giving sixty days written notice to the other party."
 P6 = "The supplier maintains commercial general liability insurance with a coverage limit of AED 5,000,000 per occurrence."
 SIX_PAGES = [P1, P2, P3, P4, P5, P6]
+
+# Adjacent-topic decoys for the relevance-floor regressions below.
+Q_LATE = "A late payment incurs a penalty of 1.0% per month on the outstanding balance."
+Q_EXPORT = "The Customer shall comply with applicable export control and sanctions laws at all times."
+EIGHT_PAGES = SIX_PAGES + [Q_LATE, Q_EXPORT]
+
+# Inflected wording: the clause says "governed", the question says "governs".
+GOV_PAGES = SIX_PAGES + [
+    "GOVERNING LAW\nThis Agreement is governed by the laws of the Republic of Cascadia, "
+    "without regard to conflict-of-law principles.",
+    "SERVICE METRICS\nMetric Value Owner\nReview period 6 business days Contract Manager\n"
+    "Escalation target 1 business days Service Lead",
+]
 
 
 # ── intent parsing (pure) ────────────────────────────────────────────────────
@@ -70,6 +85,49 @@ def test_focus_terms_separate_substance_from_structure() -> None:
     # Morphology-tolerant hits.
     assert focus_hits("Either party may terminate on notice.", {"termination", "notice"}) == 2
     assert focus_hits("unrelated sentence about logistics.", {"termination", "notice"}) == 0
+
+
+def test_focus_stems_are_word_boundary_anchored() -> None:
+    # Bug #3: a raw substring stem let "late" match "violate" and "apply"
+    # match "applicable", inverting the relevance floor so an unrelated quote
+    # outscored the true answer. Stems may only bridge inflections of the SAME
+    # word, starting at a word boundary.
+    assert focus_hits("party to violate these terms", {"late"}) == 0
+    assert focus_hits("a close analogy between the parties", {"liability"}) == 0
+    assert focus_hits("payments due for the reply period", {"payment"}) == 1
+    assert focus_hits("payment of the late fee", {"late"}) == 1
+    assert focus_hits("it is applicable here", {"applicable"}) == 1
+    assert focus_hits("a delayed violation", {"violation"}) == 1
+
+
+def test_quantity_terms_are_answered_by_numbers() -> None:
+    # "percentage" is legitimately answered by "1.0% per month" even though
+    # the words differ — a generic quantity<->digit bridge, not a lookup table.
+    assert focus_hits("a late payment penalty of 1.0% per month", {"percentage"}) == 1
+    # But a term-less, number-less sentence gets no free bridge.
+    assert focus_hits("no quantity referenced at all", {"percentage"}) == 0
+
+
+def test_matchers_expose_morphology_without_the_numeric_bridge() -> None:
+    # Extraction scores with matches_word only (keeps candidate ranking
+    # discriminating); the evidence floor uses matches_term (adds the bridge).
+    assert matches_word("the agreement is governed by cascadian law", "governs")
+    assert not matches_word("party to violate these terms", "late")
+    assert not matches_term("a sentence with no numbers", "amount")
+    assert matches_term("a total of 42 items", "amount")
+
+
+def test_comparative_framing_words_are_not_topics() -> None:
+    # Bug #5: "compare" / "across" / "these" / "evidence" / "supports" describe
+    # HOW to answer, not WHAT to look for. Counted as focus terms they raised
+    # the relevance floor above any clause that mentions only its real topic,
+    # so every comparison question degenerated into a not-found answer.
+    assert specific_keywords(
+        "Compare the liability-related terms across these two documents."
+    ) == {"liability", "terms"}
+    assert specific_keywords(
+        "What evidence in each document supports the liability analysis?"
+    ) == {"liability"}
 
 
 # ── pipeline behavior ────────────────────────────────────────────────────────
@@ -198,3 +256,112 @@ def test_multi_document_page_attribution_is_per_document(client: TestClient, tmp
     finally:
         client.delete(f"{API}/{a_id}")
         client.delete(f"{API}/{b_id}")
+
+
+def test_quantity_question_prefers_numeric_evidence_over_adjacent_prose(
+    client: TestClient, tmp_path: Path
+) -> None:
+    # Bug #3 end-to-end: "What percentage applies to late payments?" was
+    # answered with the export-control/sanctions quote ("applicable" matched
+    # the "apply" stem, "violated" matched "late") while the true "1.0% per
+    # month" quote fell below the floor. Adjacent-topic prose must never
+    # outrank the quote that actually carries the requested quantity.
+    doc_id = _ready(client, tmp_path / "eight.pdf", "eight.pdf", EIGHT_PAGES)
+    try:
+        quotes, answer = _ask(
+            client, [doc_id], "What percentage applies to late payments?"
+        )
+        texts = " ".join(q["text"] for q in quotes)
+        assert any("1.0%" in q["text"] for q in quotes), texts
+        assert "sanctions" not in texts, texts
+        assert "1.0%" in answer
+    finally:
+        client.delete(f"{API}/{doc_id}")
+
+
+def test_comparison_question_answers_from_every_selected_document(
+    client: TestClient, tmp_path: Path
+) -> None:
+    # Bug #5 end-to-end: a comparison question over two documents returned a
+    # not-found refusal because its framing words counted as focus terms.
+    # Each document must answer with its OWN clause and keep its own id.
+    a_id = _ready(client, tmp_path / "a.pdf", "a.pdf", SIX_PAGES)
+    b_pages = list(SIX_PAGES)
+    b_pages[5] = (
+        "The supplier maintains professional liability insurance with an "
+        "aggregate liability limit of AED 750,000 per claim."
+    )
+    b_id = _ready(client, tmp_path / "b.pdf", "b.pdf", b_pages)
+    try:
+        quotes, answer = _ask(
+            client,
+            [a_id, b_id],
+            "Compare the liability-related terms across these two documents.",
+        )
+        assert quotes, "a comparison question must retrieve evidence"
+        by_doc = {q["documentId"] for q in quotes}
+        assert by_doc == {a_id, b_id}, by_doc
+        texts = " ".join(q["text"] for q in quotes)
+        assert "5,000,000" in texts and "750,000" in texts, texts
+
+        quotes2, _ = _ask(
+            client,
+            [a_id, b_id],
+            "What evidence in each document supports the liability analysis?",
+        )
+        assert {q["documentId"] for q in quotes2} == {a_id, b_id}, quotes2
+    finally:
+        client.delete(f"{API}/{a_id}")
+        client.delete(f"{API}/{b_id}")
+
+
+def test_zero_relevance_quotes_never_reach_composition(
+    client: TestClient, tmp_path: Path
+) -> None:
+    # Soft floor: with only two focus terms (below the hard floor of 3), a
+    # verified quote that matches NONE of them must still be dropped from
+    # the evidence handed to composition.
+    doc_id = _ready(client, tmp_path / "eight.pdf", "eight.pdf", EIGHT_PAGES)
+    try:
+        quotes, _ = _ask(
+            client, [doc_id], "What liability cap amount applies to the supplier?"
+        )
+        assert quotes, "the cap quote itself must survive"
+        assert any("5,000,000" in q["text"] for q in quotes)
+        assert not any("sanctions" in q["text"].lower() for q in quotes)
+    finally:
+        client.delete(f"{API}/{doc_id}")
+
+
+def test_inflected_question_word_still_finds_the_clause(
+    client: TestClient, tmp_path: Path
+) -> None:
+    # Bug #4: extraction scored candidates with raw substring equality, so the
+    # question word "governs" never matched the clause's "governed" and the
+    # governing-law section was unreachable — the app refused a question the
+    # document plainly answers.
+    doc_id = _ready(client, tmp_path / "gov.pdf", "gov.pdf", GOV_PAGES)
+    try:
+        quotes, answer = _ask(client, [doc_id], "Which law governs this agreement?")
+        assert quotes, "the governed-by clause must be retrieved"
+        assert any("Republic of Cascadia" in q["text"] for q in quotes)
+        assert "Cascadia" in answer
+    finally:
+        client.delete(f"{API}/{doc_id}")
+
+
+def test_table_labels_are_found_from_singular_or_plural_question(
+    client: TestClient, tmp_path: Path
+) -> None:
+    # A table row labelled "Escalation target" must answer a question asking
+    # for "escalation targets" (and vice versa) on the requested page.
+    doc_id = _ready(client, tmp_path / "gov.pdf", "gov.pdf", GOV_PAGES)
+    try:
+        quotes, answer = _ask(
+            client, [doc_id], "What are the escalation targets on page 8?"
+        )
+        assert quotes, [q["text"] for q in quotes]
+        assert all(q["pageStart"] == 8 for q in quotes)
+        assert "1 business days" in answer
+    finally:
+        client.delete(f"{API}/{doc_id}")

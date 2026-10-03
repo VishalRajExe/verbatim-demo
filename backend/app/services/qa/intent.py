@@ -50,6 +50,19 @@ _META_WORDS = frozenset(
         "following", "document", "documents", "contract", "contracts",
         "text", "there", "here", "what", "when", "where", "which", "who",
         "why", "how", "does", "did", "would", "could", "should",
+        # Comparative / analytical framing. Asking to "compare" or to show the
+        # "evidence" for something says HOW to answer, not WHAT to look for; the
+        # topic is the remaining noun ("liability"). Left in the set they dilute
+        # the relevance floor until a clause mentioning only its real topic
+        # ("limitation of liability") scores below the required two terms and
+        # every comparison question quietly becomes a not-found.
+        "compare", "compares", "compared", "comparison",
+        "comparisons", "comparative", "versus", "differ", "differs",
+        "differed", "differing", "difference", "differences", "different",
+        "differently", "similar", "similarly", "similarity", "unlike",
+        "evidence", "evidences", "evidenced", "analysis", "analyses",
+        "analyse", "analysed", "analyze", "analyzed", "support", "supports",
+        "supported", "supporting", "basis", "respective", "respectively",
     }
 )
 
@@ -60,10 +73,25 @@ _STOPWORDS = frozenset(
         "will", "shall", "were", "into", "over", "them", "they", "their",
         "your", "been", "being", "must", "may", "also", "any", "all",
         "each", "other", "than", "then", "only", "just", "such",
+        "these", "those", "both", "across", "among", "between",
     }
 )
 
 _WORD = re.compile(r"[a-z][a-z0-9]*(?:[-_][a-z0-9]+)*")
+
+# Question words that ask for a QUANTITY. A verified quote containing an actual
+# number answers such a term even when the wording differs ("percentage" is
+# answered by "1.0% per month"). This bridge keeps numeric legal search working
+# when the document phrases the number without the question's noun.
+_QUANTITY_TERMS = frozenset(
+    {
+        "percentage", "percent", "proportion", "ratio", "amount", "total",
+        "number", "value", "figure", "cost", "price", "rate", "quantity",
+        "duration", "period",
+    }
+)
+
+_HAS_DIGIT = re.compile(r"\d")
 
 
 def parse_page_constraints(question: str) -> set[int]:
@@ -92,20 +120,43 @@ def specific_keywords(question: str) -> set[str]:
     return out
 
 
-def focus_hits(text: str, focus_terms: set[str]) -> int:
-    """Count distinct focus terms present in ``text``.
+def term_stem(term: str) -> str:
+    """Crude stem used to bridge English inflection: drops up to the last three
+    characters but never fewer than four, so stems stay specific ("termination"
+    -> "terminat", "governs" -> "govern", "late" -> "late")."""
+    return term[: max(4, len(term) - 3)]
 
-    Prefix-tolerant (a crude stem that drops up to the last three characters,
-    keeping at least four): "termination" matches "terminate", "requests"
-    matches "request", "liability" matches "liabilities". Morphological
-    variants of the asked-about concept count as relevance; unrelated
-    vocabulary does not. The four-character floor keeps stems long enough to
-    stay specific while bridging common English suffixes.
+
+def matches_word(text: str, term: str) -> bool:
+    """True if ``text`` contains an inflection of ``term`` ("governs" matches
+    "governed", "requests" matches "request").
+
+    The stem is anchored at a WORD BOUNDARY: a raw substring test would let
+    "late" match "violate" and "appl" match "applicable", which ranks unrelated
+    boilerplate above the passage that actually answers the question.
     """
     lo = (text or "").lower()
-    hits = 0
-    for term in focus_terms:
-        stem = term[: max(4, len(term) - 3)]
-        if stem in lo:
-            hits += 1
-    return hits
+    return bool(re.search(r"\b" + re.escape(term_stem(term)), lo))
+
+
+def matches_term(text: str, term: str) -> bool:
+    """Relevance test used by the evidence floor: an inflection of the term, OR
+    — for a quantity word like "percentage"/"amount" — any quote carrying a
+    real number, because documents state quantities in figures rather than
+    repeating the question's noun. No value is ever hardcoded.
+    """
+    lo = (text or "").lower()
+    if matches_word(lo, term):
+        return True
+    return term in _QUANTITY_TERMS and bool(_HAS_DIGIT.search(lo))
+
+
+def focus_hits(text: str, focus_terms: set[str]) -> int:
+    """Count distinct focus terms present in ``text`` (see ``matches_term``).
+
+    This is the single relevance rule shared by extraction and by the
+    verified-evidence floor, so the two stages can never disagree about what
+    counts as "speaking to the question".
+    """
+    lo = (text or "").lower()
+    return sum(1 for term in focus_terms if matches_term(lo, term))

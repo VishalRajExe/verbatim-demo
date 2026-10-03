@@ -21,6 +21,21 @@ from app.services.citations.service import canonical_for_document
 _EPS = 1.0  # tolerance when deciding if a word overlaps a page slice
 
 
+class SourceFileMissingError(Exception):
+    """The document's stored source file is not on storage.
+
+    Extracted text can live in the database while the original file is gone
+    (deleted, moved, or restored from another machine). Text-based answers are
+    then still possible, but geometry is not: this is a distinct, honest
+    condition and must never be reported as "this citation is not in this
+    document", which would wrongly cast doubt on a verified quote.
+    """
+
+    def __init__(self, document_id: str) -> None:
+        super().__init__(f"Source file not found on storage for document {document_id}.")
+        self.document_id = document_id
+
+
 def locate_ranges(
     db: Session, document_id: str, ranges: list[tuple[int, int]]
 ) -> list[dict]:
@@ -46,7 +61,12 @@ def locate_ranges(
 
     results: list[dict] = []
     if doc.file_type == ".pdf":
-        pdf = fitz.open(str(Path(doc.file_path)))
+        source = Path(doc.file_path)
+        if not source.is_file():
+            # Open must not be attempted on a missing path: PyMuPDF raises a
+            # raw OSError that escapes as an opaque HTTP 500.
+            raise SourceFileMissingError(document_id)
+        pdf = fitz.open(str(source))
         try:
             for start, end in ranges:
                 results.extend(_locate_pdf(pdf, canonical, page_ranges, start, end))

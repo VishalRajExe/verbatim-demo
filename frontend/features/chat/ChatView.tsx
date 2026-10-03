@@ -58,7 +58,11 @@ export function ChatView() {
   const toggle = (id: string) =>
     setSelected((prev) => {
       const next = new Set(prev);
-      next.has(id) ? next.delete(id) : next.add(id);
+      if (next.has(id)) {
+        next.delete(id);
+      } else {
+        next.add(id);
+      }
       return next;
     });
 
@@ -136,6 +140,7 @@ export function ChatView() {
   }
 
   async function openConversation(id: string) {
+    setActiveQuote(null); // never show a drawer from the previous conversation
     let detail;
     try {
       detail = await getConversation(id);
@@ -193,9 +198,8 @@ export function ChatView() {
     abortRef.current?.abort();
     setTurns([]);
     setActiveConv(null);
+    setActiveQuote(null);
   }
-
-  const last = turns[turns.length - 1];
 
   return (
     <div className="flex h-full">
@@ -319,11 +323,11 @@ export function ChatView() {
       </div>
 
       {activeQuote && (
-        <QuotePanel
-          key={`${activeQuote.documentId}#${activeQuote.ref}#${activeQuote.start}`}
-          quote={activeQuote}
-          onClose={() => setActiveQuote(null)}
-        />
+        // Same-instance drawer: switching citations updates the quote in place
+        // (no remount, no close→reopen→click-again). QuotePanel's effect is
+        // keyed on `quote` and guards stale async responses, and PdfViewer
+        // fully resets when docId changes, so document scoping is preserved.
+        <QuotePanel quote={activeQuote} onClose={() => setActiveQuote(null)} />
       )}
     </div>
   );
@@ -434,11 +438,26 @@ function QuotePanel({
   const [location, setLocation] = useState<string>("");
   const [loading, setLoading] = useState(true);
   const [notFound, setNotFound] = useState(false);
+  // A verified quote whose document has lost its stored source file is NOT the
+  // same failure as a quote that is absent from the document. Keep them apart so
+  // the drawer never implies a verified citation is bogus.
+  const [sourceMissing, setSourceMissing] = useState(false);
+
+  // Close the drawer with Escape; clicking another citation while it is open
+  // switches in place instead of requiring a close + reopen.
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === "Escape") onClose();
+    };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, [onClose]);
 
   useEffect(() => {
     let alive = true;
     setLoading(true);
     setNotFound(false);
+    setSourceMissing(false);
     setLocation("");
     setPages([]);
     (async () => {
@@ -472,6 +491,9 @@ function QuotePanel({
 
         if (!alive) return;
         if (!found) {
+          // The text is stored in the database, so a range that resolves to no
+          // geometry at all can also mean the source file went missing; the
+          // typed 404 above is the authority, this is the fallback.
           setNotFound(true);
           return;
         }
@@ -481,8 +503,13 @@ function QuotePanel({
             ? `Page ${l.pageNumber} (exact text position available; pixel geometry is PDF-only)`
             : `Page ${l.pageNumber} · ${l.rects.length} line(s) matched`,
         );
-      } catch {
-        if (alive) setNotFound(true);
+      } catch (err) {
+        if (!alive) return;
+        if ((err as Error).message.includes("Source file not found on storage")) {
+          setSourceMissing(true);
+          return;
+        }
+        setNotFound(true);
       } finally {
         if (alive) setLoading(false);
       }
@@ -497,11 +524,13 @@ function QuotePanel({
   const isPdf = quote.documentName.toLowerCase().endsWith(".pdf");
 
   return (
-    <div className="fixed inset-0 z-40 flex justify-end bg-slate-900/20" onClick={onClose}>
-      <div
-        className="flex h-full w-[34rem] max-w-[92vw] flex-col bg-white shadow-xl"
-        onClick={(e) => e.stopPropagation()}
-      >
+    // Side drawer pinned to the right edge. It intentionally does NOT cover
+    // the whole screen: a full-screen backdrop used to swallow the first
+    // click on another citation chip, forcing close→reopen→click again.
+    <div
+      data-testid="quote-drawer"
+      className="fixed inset-y-0 right-0 z-40 flex w-[34rem] max-w-[92vw] flex-col border-l border-slate-200 bg-white shadow-xl"
+    >
         <div className="flex items-center justify-between border-b border-slate-200 px-4 py-3">
           <div className="text-sm font-semibold text-slate-800">
             {quote.ref} · {quote.documentName}
@@ -530,7 +559,20 @@ function QuotePanel({
             </div>
           ) : (
           <>
-          {isPdf && (
+          {!loading && sourceMissing && (
+            <div
+              data-testid="source-missing"
+              className="mt-6 rounded-lg border border-slate-200 bg-slate-50 p-4 text-sm text-slate-700"
+            >
+              The stored source file for {quote.documentName} is missing on the
+              server, so page geometry cannot be shown.
+              <div className="mt-1 text-xs text-slate-500">
+                The quote below was still verified against this document&rsquo;s
+                extracted text; re-upload the file to restore highlighting.
+              </div>
+            </div>
+          )}
+          {isPdf && !sourceMissing && (
             <div className="mb-4">
               <div className="mb-2 flex items-center justify-between">
                 <span className="text-xs font-medium uppercase tracking-wide text-slate-400">
@@ -572,7 +614,6 @@ function QuotePanel({
           </>
           )}
         </div>
-      </div>
     </div>
   );
 }
@@ -584,7 +625,7 @@ function highlight(text: string, quote: string) {
   const tw = text.split(/(\s+)/);
   const qw = quote.trim().split(/\s+/);
   // Build a whitespace-stripped index map.
-  let tokens: { w: string; idx: number }[] = [];
+  const tokens: { w: string; idx: number }[] = [];
   tw.forEach((t, idx) => {
     if (t.trim()) tokens.push({ w: t.toLowerCase(), idx });
   });

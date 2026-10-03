@@ -22,6 +22,7 @@ from app.services.redlining.tracked_changes import (
 class Edit:
     target: str
     replacement: str
+    context: str = ""  # unique surrounding passage that pins a repeated target
 
 
 @dataclass
@@ -39,7 +40,9 @@ def apply_redlines(source: bytes, edits: list[Edit], author: str = "Legal AI") -
     dropped: list[dict] = []
     for edit in edits:
         try:
-            apply_tracked_edit(document, edit.target, edit.replacement, author=author)
+            apply_tracked_edit(
+                document, edit.target, edit.replacement, author=author, context=edit.context
+            )
             applied.append(edit)
         except ValueError as exc:
             dropped.append({"target": edit.target, "reason": str(exc)})

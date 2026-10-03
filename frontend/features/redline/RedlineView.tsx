@@ -14,6 +14,7 @@ import type { DocumentOut, ProposedEdit, RedlineOut } from "@/lib/types";
 interface Row {
   target: string;
   replacement: string;
+  context?: string;
 }
 
 type Mode = "instruction" | "manual";
@@ -24,6 +25,29 @@ function statusOf(r: RedlineOut): { label: string; cls: string } {
   if (r.applied.length > 0)
     return { label: "Partially applied", cls: "bg-amber-50 text-amber-700" };
   return { label: "Nothing applied", cls: "bg-red-50 text-red-700" };
+}
+
+// Inline redline preview: the located clause with the target struck through and
+// the replacement inserted, so the reviewer sees the tracked change in context
+// before applying it.
+function RedlinePreview({ e }: { e: ProposedEdit }) {
+  const inContext = !!e.context && e.context.includes(e.target);
+  const shown = inContext ? e.context : e.target;
+  const idx = shown ? shown.indexOf(e.target) : -1;
+  const before = idx >= 0 ? shown.slice(0, idx) : "";
+  const after = idx >= 0 ? shown.slice(idx + e.target.length) : "";
+  return (
+    <p className="break-words text-sm leading-relaxed text-slate-600">
+      {before}
+      <span className="mx-0.5 rounded bg-red-50 px-1 text-red-600 line-through">
+        {e.target}
+      </span>
+      <span className="mx-0.5 rounded bg-emerald-50 px-1 text-emerald-700">
+        {e.replacement || "(deleted)"}
+      </span>
+      {after}
+    </p>
+  );
 }
 
 export function RedlineView() {
@@ -110,7 +134,7 @@ export function RedlineView() {
   }
 
   async function applyEdits(
-    edits: { target: string; replacement: string }[],
+    edits: { target: string; replacement: string; context?: string }[],
     instructionText: string | null,
   ) {
     if (!docId || edits.length === 0) {
@@ -138,7 +162,11 @@ export function RedlineView() {
   function onApplyProposal() {
     const selected = proposed.filter((e) => e.include);
     applyEdits(
-      selected.map((e) => ({ target: e.target, replacement: e.replacement })),
+      selected.map((e) => ({
+        target: e.target,
+        replacement: e.replacement,
+        context: e.context,
+      })),
       instruction.trim(),
     );
   }
@@ -147,7 +175,11 @@ export function RedlineView() {
     applyEdits(
       rows
         .filter((r) => r.target.trim().length > 0)
-        .map((r) => ({ target: r.target, replacement: r.replacement })),
+        .map((r) => ({
+          target: r.target,
+          replacement: r.replacement,
+          context: r.context,
+        })),
       null,
     );
   }
@@ -155,7 +187,11 @@ export function RedlineView() {
   function reuseAsManual(r: RedlineOut) {
     setRows(
       r.applied.length > 0
-        ? r.applied.map((e) => ({ target: e.target, replacement: e.replacement }))
+        ? r.applied.map((e) => ({
+            target: e.target,
+            replacement: e.replacement,
+            context: e.context,
+          }))
         : [{ target: "", replacement: "" }],
     );
     setMode("manual");
@@ -298,15 +334,27 @@ export function RedlineView() {
                       className="mt-0.5"
                     />
                     <div className="min-w-0 flex-1">
-                      <div className="flex flex-wrap items-baseline gap-2">
-                        <span className="text-red-600 line-through break-words">
-                          {e.target}
+                      <div className="mb-1 flex flex-wrap items-center gap-2">
+                        <span className="text-xs font-semibold text-slate-400">
+                          {"#"}
+                          {i + 1}
                         </span>
-                        <span className="text-slate-400">→</span>
-                        <span className="text-emerald-700 break-words">
-                          {e.replacement || "(deleted)"}
-                        </span>
+                        {e.verified ? (
+                          <span className="rounded-full bg-emerald-50 px-2 py-0.5 text-[11px] font-medium text-emerald-700">
+                            Verified
+                          </span>
+                        ) : (
+                          <span className="rounded-full bg-amber-50 px-2 py-0.5 text-[11px] font-medium text-amber-700">
+                            Unverified
+                          </span>
+                        )}
+                        {e.occurrences > 1 && (
+                          <span className="rounded-full bg-slate-100 px-2 py-0.5 text-[11px] font-medium text-slate-500">
+                            Single occurrence via context ({e.occurrences} in doc)
+                          </span>
+                        )}
                       </div>
+                      <RedlinePreview e={e} />
                       {e.reason && (
                         <div className="mt-1 text-xs text-slate-400">{e.reason}</div>
                       )}

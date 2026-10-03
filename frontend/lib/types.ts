@@ -154,7 +154,7 @@ export interface RedlineOut {
   instruction: string | null;
   insertions: number;
   deletions: number;
-  applied: { target: string; replacement: string }[];
+  applied: { target: string; replacement: string; context?: string }[];
   dropped: { target: string; reason: string }[];
   downloadUrl: string;
   createdAt: string;
@@ -165,6 +165,9 @@ export interface ProposedEdit {
   replacement: string;
   reason: string;
   include: boolean;
+  context: string;
+  occurrences: number;
+  verified: boolean;
 }
 
 export interface RedlineProposeOut {

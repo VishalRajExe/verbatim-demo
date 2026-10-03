@@ -11,10 +11,17 @@ from __future__ import annotations
 import re
 from dataclasses import dataclass
 
-# A captured value ends at sentence punctuation, end of the instruction, or a
-# comma that starts a *new* command — never at the comma inside "2,000,000"
-# and never at the decimal point inside "0.5%".
-_STOP = r"(?=\s*(?:[;!?]|\.(?!\d)|$|,\s+(?:and\s+)?(?:change|replace|update|revise|amend|convert)\b))"
+# A captured value ends at sentence punctuation, end of the instruction, or the
+# start of a *new* command — never at the comma inside "2,000,000" and never at
+# the decimal point inside "0.5%". A new command can be introduced by a comma,
+# by a bare coordinating conjunction ("... to 72 hours and change 15 days to 30
+# days"), or by both (", and change"); the conjunction must be followed by a
+# change verb so an ordinary "and" inside a value ("laws of England and Wales")
+# can never split an intent.
+_STOP = (
+    r"(?=\s*(?:[;!?]|\.(?!\d)|$|"
+    r"(?:,\s*(?:and\s+)?|\b(?:and|then|also)\s+)(?:change|replace|update|revise|amend|convert)\b))"
+)
 
 # An explicit "from <old> to <new>" or "replace <old> with <new>" pairing.
 _FROM_TO = re.compile(
@@ -39,7 +46,7 @@ _VALUE_TOKEN = re.compile(
     (?:
         \b[A-Z]{2,4}\s*\$?\s*\d[\d,\.]*\s*(?:million|billion|thousand)?   # AED 500,000
       | \$\s*\d[\d,\.]*\s*(?:million|billion|thousand)?                   # $250,000
-      | \d[\d,\.]*\s*(?i:%|percent|days?|months?|years?|AED|USD|EUR|GBP|dirhams?|dollars?)  # 30 days / 1.0% / 100 USD
+      | \d[\d,\.]*\s*(?i:%|percent|hours?|minutes?|weeks?|days?|months?|years?|quarters?|AED|USD|EUR|GBP|dirhams?|dollars?)  # 30 days / 48 hours / 1.0% / 100 USD
       | \b\d[\d,]*(?:\.\d+)?\b                                            # bare number
     )
 """
@@ -58,6 +65,7 @@ class Intent:
     expected_original: str | None  # the value/text the doc must already contain
     new_value: str | None          # the value/text to write instead
     raw: str                       # the instruction fragment it came from
+    concept: str = ""              # clause descriptor when there is no literal original
 
 
 def normalize_value(text: str) -> str:
@@ -78,13 +86,32 @@ def value_in_text(value: str, text: str) -> bool:
     return v in normalize_value(text)
 
 
+# Leading imperative / article words stripped from a clause descriptor so
+# "Change the liability cap" reduces to the concept "liability cap".
+_CONCEPT_LEAD = re.compile(
+    r"^(?:\s*(?:change|convert|update|revise|amend|set|modify|increase|decrease|"
+    r"make|the|to|of)\b)+",
+    re.IGNORECASE,
+)
+
+
+def _clean_concept(text: str) -> str:
+    return _CONCEPT_LEAD.sub("", (text or "").strip()).strip(" .,;:").strip()
+
+
+def _has_value(fragment: str) -> bool:
+    return bool(extract_value_tokens(fragment))
+
+
 def parse_instruction(instruction: str) -> list[Intent]:
     """Extract (expected_original -> new_value) intents from an instruction.
 
     Prefers the tightest pairing available: an explicit "from X to Y" wins over
-    "replace X with Y", which wins over "change X to Y" (whose from-side may
-    carry clause words instead of a bare value). Multiple pairings (one per
-    requested change) are all returned, in order of appearance.
+    "replace X with Y", which wins over "change X to Y". A "change <concept> to
+    <value>" whose from-side is a clause descriptor rather than a literal value
+    ("change the payment period to 60 days") carries no expected_original: the
+    clause is located by its concept and the value already there is replaced.
+    Multiple pairings (one per requested change) are all returned, in order.
     """
     intents: list[Intent] = []
     consumed: list[tuple[int, int]] = []
@@ -97,11 +124,32 @@ def parse_instruction(instruction: str) -> list[Intent]:
             consumed.append(span)
             raw_from = _TRAILING.sub("", m.group("from").strip()).strip(" \t'\"“”‘’")
             raw_to = _TRAILING.sub("", m.group("to").strip()).strip(" \t'\"“”‘’")
+            new_value = _expected_from_fragment(raw_to) or raw_to or None
+            if pattern is _CHANGE_TO and not _has_value(raw_from):
+                expected = None
+                concept = _clean_concept(raw_from)
+            else:
+                expected = _expected_from_fragment(raw_from)
+                if pattern is _FROM_TO:
+                    # The descriptor is the clause noun right before "from", i.e.
+                    # the text after the LAST change verb: "... change payment
+                    # terms from 30 days ..." -> "payment terms". Giving each
+                    # change its own concept lets a multi-change instruction
+                    # disambiguate its repeated values independently.
+                    lead = re.split(
+                        r"\b(?:change|convert|update|revise|amend|replace|set|modify)\b",
+                        instruction[: span[0]],
+                        flags=re.IGNORECASE,
+                    )[-1]
+                    concept = _clean_concept(lead)
+                else:
+                    concept = ""
             intents.append(
                 Intent(
-                    expected_original=_expected_from_fragment(raw_from),
-                    new_value=_expected_from_fragment(raw_to) or raw_to or None,
+                    expected_original=expected,
+                    new_value=new_value,
                     raw=m.group(0).strip(),
+                    concept=concept,
                 )
             )
     return intents
@@ -158,4 +206,105 @@ def find_similar_value(text: str, value: str, exclude: set[str]) -> str | None:
             elif not re.search(re.escape(unit) + r"s?$", norm):
                 continue
         return tok
+    return None
+
+
+# ── Semantic (natural-language) edit operations ───────────────────────────────
+# Not every instruction names a literal "from X to Y". Some describe a desired
+# STATE the clause should end up in ("make the liability cap mutual"), with no
+# original text quoted at all. Those are handled here as a small, principled set
+# of *generic drafting operations*: each is defined by the state word that
+# triggers it and a transformation applied to whatever the located clause
+# actually says. Nothing about a specific clause, party name, currency or
+# document is baked in — the same rule broadens a one-sided liability cap in any
+# contract to whichever party that contract happens to name.
+
+_STATE_OPERATIONS = {
+    "mutual": "make_mutual",
+    "mutually": "make_mutual",
+    "reciprocal": "make_mutual",
+    "reciprocally": "make_mutual",
+}
+
+# Words that already make a provision apply to both sides; a clause carrying one
+# of these governing the obligation is *already* mutual and must be left alone
+# (report honestly rather than fabricate an edit).
+_MUTUAL_MARKERS = ("each party", "both parties", "either party", "the parties")
+
+# A one-sided obligation owned by a single capitalised party noun, e.g.
+# "Supplier's aggregate liability" (possessive) or "the Supplier shall" (subject
+# + modal). "party"/"parties" are never owners — that phrasing is already
+# bilateral. Imperative verbs stripped from the instruction to recover the
+# concept the user is pointing at.
+_UNILATERAL_POSSESSIVE = re.compile(r"\b([A-Z][A-Za-z]{2,})['\u2019]s\b")
+_UNILATERAL_SUBJECT = re.compile(
+    r"\b(?:the\s+)?([A-Z][A-Za-z]{2,})\s+(?:shall|may|will|must|agrees|undertakes)\b"
+)
+_COMMAND_VERBS = re.compile(
+    r"\b(?:make|change|revise|amend|update|convert|replace|set|modify|ensure|all|to)\b",
+    re.IGNORECASE,
+)
+
+
+@dataclass
+class SemanticIntent:
+    """A state-change instruction with no literal from/to (e.g. \u201cmutual\u201d)."""
+
+    operation: str  # "make_mutual"
+    concept: str    # the noun phrase being pointed at, e.g. "liability cap"
+    raw: str
+
+
+def parse_semantic_instruction(instruction: str) -> list[SemanticIntent]:
+    """Detect state-word instructions (\u201cmake X mutual\u201d) that carry no explicit
+    original value. Returns [] for ordinary from/to instructions so the two
+    paths never overlap."""
+    if not instruction:
+        return []
+    low = instruction.lower()
+    operation = None
+    for word, op in _STATE_OPERATIONS.items():
+        if re.search(r"\b" + word + r"\b", low):
+            operation = op
+            break
+    if not operation:
+        return []
+    # Scope the concept to the clause the state word applies to. In the common
+    # "make <clause> <state>" ordering the descriptor sits *before* the state
+    # word, so cutting at the state word keeps a compound instruction ("make the
+    # liability cap mutual and change the payment period to 60 days") pointed at
+    # the liability clause rather than drifting onto the payment clause.
+    m = re.search(
+        r"\b(" + "|".join(_STATE_OPERATIONS) + r")\b", instruction, re.IGNORECASE
+    )
+    before = instruction[: m.start()] if m else instruction
+    concept = _COMMAND_VERBS.sub(" ", before)
+    concept = re.sub(r"\s+", " ", concept).strip(" .,;:")
+    concept = _clean_concept(concept)
+    return [SemanticIntent(operation=operation, concept=concept, raw=instruction.strip())]
+
+
+def make_mutual_edit(clause: str) -> tuple[str, str] | None:
+    """Return ``(target, replacement)`` that broadens a one-sided clause to both
+    parties, or ``None`` when the clause is already mutual or names no single
+    owner. The target is the exact unilateral reference found in the clause, so
+    it is always a verbatim substring of the authoritative text."""
+    if not clause:
+        return None
+    low = clause.lower()
+    pos = _UNILATERAL_POSSESSIVE.search(clause)
+    if pos and pos.group(1).lower() not in ("party", "parties"):
+        # Already mutual? A mutual marker governing the same obligation means
+        # there is nothing honest to change.
+        if any(marker in low for marker in _MUTUAL_MARKERS):
+            return None
+        return pos.group(0), "each party\u2019s"
+    subj = _UNILATERAL_SUBJECT.search(clause)
+    if subj and subj.group(1).lower() not in ("party", "parties"):
+        if any(marker in low for marker in _MUTUAL_MARKERS):
+            return None
+        # Rebuild the matched "[the] Owner modal" span with a bilateral subject.
+        matched = subj.group(0)
+        rebuilt = re.sub(r"^(?:the\s+)?[A-Z][A-Za-z]{2,}", "each party", matched, count=1)
+        return matched, rebuilt
     return None

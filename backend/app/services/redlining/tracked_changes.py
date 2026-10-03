@@ -90,6 +90,29 @@ def find_paragraph_with_target(document: Document, target: str) -> tuple[int, Pa
     return None, None
 
 
+def _paragraph_for_target(
+    document: Document, target: str, context: str
+) -> tuple[int, Paragraph] | tuple[None, None]:
+    """Pick the paragraph to edit.
+
+    When the target is globally unique that is the paragraph. When it repeats,
+    a verbatim ``context`` passage that occurs exactly once and contains the
+    target pins the single intended paragraph; otherwise nothing is chosen (the
+    caller drops the edit rather than guessing an occurrence).
+    """
+    if count_occurrences(document, target) == 1:
+        return find_paragraph_with_target(document, target)
+    if context:
+        hits = [
+            (i, para)
+            for i, para in enumerate(document.paragraphs)
+            if context in _para_text(para._p) and target in _para_text(para._p)
+        ]
+        if len(hits) == 1:
+            return hits[0]
+    return None, None
+
+
 def count_occurrences(document: Document, target: str) -> int:
     total = 0
     for para in document.paragraphs:
@@ -103,17 +126,27 @@ def apply_tracked_edit(
     replacement: str,
     author: str = "Legal AI",
     timestamp: datetime | None = None,
+    context: str = "",
 ) -> AppliedEdit:
     """Wrap ``target`` in ``w:del`` and insert ``replacement`` as ``w:ins``.
 
-    Requires the target to occur exactly once, inside a single paragraph. Raises
-    ValueError otherwise so the caller can report the dropped edit honestly.
+    Requires the target to resolve to exactly one location: either it occurs once
+    in the document, or a unique ``context`` passage pins which of several
+    occurrences is meant. Raises ValueError otherwise so the caller can report
+    the dropped edit honestly.
     """
-    if count_occurrences(document, target) != 1:
-        raise ValueError("Edit target must occur exactly once in the document.")
-
-    idx, para = find_paragraph_with_target(document, target)
+    if not target:
+        raise ValueError("Edit target is empty.")
+    occ = count_occurrences(document, target)
+    if occ == 0:
+        raise ValueError("Edit target not found.")
+    idx, para = _paragraph_for_target(document, target, context)
     if para is None:
+        if occ > 1:
+            raise ValueError(
+                "Edit target appears more than once (not exactly once); provide "
+                "unique surrounding context to disambiguate."
+            )
         raise ValueError("Edit target not found.")
 
     p = para._p

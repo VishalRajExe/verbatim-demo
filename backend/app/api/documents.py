@@ -27,7 +27,7 @@ from app.schemas.document import (
     UploadAccepted,
     VerifyRequest,
 )
-from app.services.citations.locate import locate_ranges
+from app.services.citations.locate import SourceFileMissingError, locate_ranges
 from app.services.citations.service import (
     DocumentNotReadyError,
     invalidate_document,
@@ -187,6 +187,10 @@ def locate_document_ranges(
         located = locate_ranges(db, doc_id, parsed)
     except DocumentNotReadyError as exc:
         raise HTTPException(409, str(exc)) from exc
+    except SourceFileMissingError as exc:
+        # Same contract as /file: the stored source is gone. Answering with a
+        # 500 makes the browser report a CORS failure instead of the truth.
+        raise HTTPException(404, str(exc)) from exc
     return {"id": doc_id, "locations": located}
 
 

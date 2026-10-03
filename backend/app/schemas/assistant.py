@@ -113,6 +113,7 @@ class RedlineEdit(BaseModel):
 
     target: str = Field(min_length=1)
     replacement: str = Field(default="")
+    context: str = Field(default="")
 
 
 class RedlineRequest(BaseModel):
@@ -134,6 +135,9 @@ class ProposedEditOut(BaseModel):
     replacement: str
     reason: str = ""
     include: bool = True
+    context: str = ""
+    occurrences: int = 1
+    verified: bool = True
 
 
 class RedlineProposeOut(BaseModel):
