@@ -56,6 +56,21 @@ class Settings(BaseSettings):
             return {e.strip().lower() for e in v.split(",") if e.strip()}
         return v
 
+    @field_validator("database_url", mode="before")
+    @classmethod
+    def _norm_db_url(cls, v):
+        # Managed MySQL providers (PlanetScale / Aiven / Railway / ClearDB) hand
+        # out plain "mysql://" URLs, but SQLAlchemy needs the PyMySQL driver
+        # scheme this app is built around. Normalise the common variants so a
+        # provider connection string works unchanged; leave anything already
+        # dialect-qualified (e.g. mysql+pymysql://) exactly as given.
+        if isinstance(v, str):
+            v = v.strip()
+            for scheme in ("mysql://", "mysql2://", "mariadb://"):
+                if v.startswith(scheme):
+                    return "mysql+pymysql://" + v[len(scheme):]
+        return v
+
     @property
     def max_file_size_bytes(self) -> int:
         return self.max_file_size_mb * 1024 * 1024

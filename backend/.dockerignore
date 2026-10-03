@@ -1,0 +1,31 @@
+# Keep the backend Docker build context small and free of local-only state.
+# Paths are relative to the backend/ directory (the build context).
+
+# Virtualenvs / caches
+.venv/
+venv/
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+*.egg-info/
+
+# Local environment + secrets (never bake these into the image)
+.env
+.env.*
+*.pem
+
+# Local runtime data (uploads, processed/redlined files, scratch scripts)
+data/
+*.log
+*.sqlite3
+
+# Tests are not needed in the production image
+tests/
+
+# Editor / OS noise
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db

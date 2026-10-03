@@ -1,0 +1,53 @@
+# ─────────────────────────────────────────────────────────────────────────────
+# Render Blueprint — Legal Contract Intelligence BACKEND (FastAPI + MySQL).
+#
+# Deploy this backend to Render, the Next.js frontend to Vercel (see
+# DEPLOYMENT.md). Render does NOT offer managed MySQL, so point DATABASE_URL at
+# an external MySQL (PlanetScale / Aiven / Railway / TiDB / ClearDB). Plain
+# "mysql://" URLs are auto-normalised to "mysql+pymysql://" by the app.
+#
+# Secrets are intentionally NOT stored in this file: keys marked `sync: false`
+# are read from the Render dashboard on (re)deploy, so nothing sensitive lands
+# in git. Create the service with:  render blueprints sync   (or via the UI).
+# ─────────────────────────────────────────────────────────────────────────────
+
+services:
+  - type: web
+    name: lci-backend
+    runtime: python
+    plan: starter            # free plan works too but has NO persistent disk
+    region: oregon
+    rootDir: backend         # requirements.txt / app / migrations live here
+    buildCommand: "pip install -r requirements.txt"
+    startCommand: "uvicorn app.main:app --host 0.0.0.0 --port $PORT"
+    healthCheckPath: /api/health
+    autoDeployTrigger: commit
+
+    envVars:
+      - key: PYTHON_VERSION
+        value: "3.12.8"
+      # ── Secrets (set in the Render dashboard, never committed) ──
+      - key: DATABASE_URL
+        sync: false          # e.g. mysql://user:pass@host:3306/legal_contract_intelligence?ssl_mode=REQUIRED
+      - key: GEMINI_API_KEY
+        sync: false
+      # ── Behaviour ──
+      - key: GEMINI_MODEL
+        value: "gemini-flash-lite-latest"
+      - key: LLM_PROVIDER
+        value: "gemini"      # "mock" runs a fully offline deterministic demo
+      - key: CORS_ORIGINS
+        # JSON list of allowed browser origins. Replace with your Vercel URL.
+        value: '["http://localhost:3000","https://your-app.vercel.app"]'
+      - key: STORAGE_DIR
+        value: "/var/data/lci"   # mounted persistent disk (uploads + redlines)
+      - key: MAX_FILE_SIZE_MB
+        value: "80"
+
+    # Persistent disk so uploaded documents and generated redlines survive
+    # restarts/redeploys. Requires a paid instance plan; on the free plan the
+    # filesystem is ephemeral (see DEPLOYMENT.md "Storage & persistence").
+    disks:
+      - name: lci-storage
+        mountPath: /var/data
+        sizeGB: 1
