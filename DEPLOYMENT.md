@@ -6,7 +6,7 @@ live deployment. It is written for the stack actually in this repo:
 | Layer | Technology | Recommended host |
 |---|---|---|
 | Frontend | Next.js 16 (App Router) / React 19 | **Vercel** |
-| Backend API | FastAPI + Uvicorn (Python 3.12) | **Render** (native Python or Docker) |
+| Backend API | FastAPI + Uvicorn (Python 3.12) | **Render** (Docker — image pins Python 3.12) |
 | Database | MySQL 8/9 (SQLAlchemy + Alembic) | **External managed MySQL** (Render has no managed MySQL) |
 | AI | Google Gemini (`google-genai`) | Google AI Studio API key |
 | File storage | Local filesystem (`STORAGE_DIR`) | Render persistent disk (or object storage, see notes) |
@@ -86,8 +86,8 @@ The frontend derives its API base from `NEXT_PUBLIC_API_URL`
    - `GEMINI_API_KEY` → your key
 3. Edit `CORS_ORIGINS` to include your Vercel origin, e.g.
    `["https://your-app.vercel.app"]`.
-4. Apply. The service builds (`pip install -r requirements.txt`), starts
-   (`uvicorn app.main:app --host 0.0.0.0 --port $PORT`), and health-checks
+4. Apply. The service **builds `backend/Dockerfile`** (base image
+   `python:3.12-slim`), starts uvicorn on `0.0.0.0:$PORT`, and health-checks
    `/api/health`.
 5. Your backend URL is `https://<service>.onrender.com`.
 
@@ -95,12 +95,20 @@ The Blueprint also mounts a **persistent disk** at `/var/data` and points
 `STORAGE_DIR` there so uploads/redlines survive restarts (needs a paid instance;
 see §6).
 
-### Option B — Manual web service
+> **Why Docker, not Render's native Python?** Render's default interpreter is
+> now **3.14**, and the pinned packages (`rapidfuzz`, `PyMuPDF`, `cryptography`,
+> `lxml`) have no cp314 wheels — pip then compiles `rapidfuzz` from source and
+> its build backend fails (`metadata-generation-failed ╰─> rapidfuzz`). The
+> Dockerfile pins `python:3.12`, where every dependency installs from a prebuilt
+> wheel, so the build is deterministic. The `PYTHON_VERSION` env pin is not
+> reliably honoured by the native buildpack, which is why we build an image.
 
-New → Web Service → connect repo → **Runtime: Python** → **Root Directory:
-`backend`** → Build `pip install -r requirements.txt` → Start
-`uvicorn app.main:app --host 0.0.0.0 --port $PORT` → add the env vars above →
-set Health Check Path `/api/health`.
+### Option B — Manual web service (Docker)
+
+New → Web Service → connect repo → **Environment/Build: Docker** → **Dockerfile
+Path: `backend/Dockerfile`** → **Context Path: `backend`** → add the env vars
+above → set Health Check Path `/api/health`. (Avoid choosing Runtime: Python
+here — it defaults to 3.14 and hits the wheel problem above.)
 
 ### Option C — Docker
 
@@ -188,7 +196,8 @@ identically in both providers because it is provider-independent.
 | Symptom | Likely cause | Fix |
 |---|---|---|
 | Backend boots then crashes on DB | Wrong `DATABASE_URL` / SSL / host not allowlisted | Verify URL; add provider SSL params; allowlist Render egress IPs (PlanetScale). |
-| `cryptography`/`PyMuPDF` build errors on deploy | Using an old base image without wheels | Use Python 3.12 (as pinned) or the provided Dockerfile. |
+| Build fails: `metadata-generation-failed ╰─> rapidfuzz` / `Extra keys present in "project"` | Render's native buildpack used **Python 3.14** (no cp314 wheels → source build) | Deploy via the **Docker** runtime (`render.yaml` now does); the image pins `python:3.12`. |
+| `cryptography`/`PyMuPDF` build errors on deploy | Using an interpreter with no prebuilt wheels | Use Python 3.12 (as pinned) or the provided Dockerfile. |
 | Frontend loads, API calls fail | `NEXT_PUBLIC_API_URL` wrong or not rebuilt | Set it and **redeploy** the frontend (build-time var). |
 | CORS errors in console | Frontend origin not in `CORS_ORIGINS` | Add exact origin; restart backend. |
 | Uploaded file / redline download 404 after a while | Ephemeral filesystem wiped | Use a persistent disk / object storage (§6). |
@@ -208,9 +217,11 @@ identically in both providers because it is provider-independent.
 ---
 
 ### What was added for deployment (this change)
-- `render.yaml` — Render Blueprint for the backend (Python service, health check,
-  persistent disk, secret-safe `sync:false` env vars).
-- `backend/Dockerfile` + `backend/.dockerignore` — optional container image.
+- `render.yaml` — Render Blueprint for the backend (**Docker** runtime so the
+  interpreter is pinned to 3.12; health check, persistent disk, secret-safe
+  `sync:false` env vars).
+- `backend/Dockerfile` + `backend/.dockerignore` — container image (the Render
+  build now uses this; also works on Fly.io / Railway / Cloud Run).
 - `.env.example` (root) — consolidated safe template.
 - `backend/app/core/config.py` — normalises `mysql://` → `mysql+pymysql://` so
   managed-MySQL connection strings work unchanged (localhost default unaffected).
