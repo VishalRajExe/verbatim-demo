@@ -146,9 +146,17 @@ def ask(
                     db, conv_id, answer, status, stopped,
                     coverage_payload, quotes_payload, unverified_payload,
                 )
-                # Populate the reuse cache only for a clean, completed answer so
-                # an interrupted or errored turn is never replayed.
-                if status == "complete" and not stopped:
+                # Populate the reuse cache only for a clean, completed answer over
+                # COMPLETE coverage. A transient chunk failure (partial coverage)
+                # is not a deterministic result - the unread sections might hold
+                # the answer - so caching it would freeze a degraded "couldn't
+                # find" and replay it until the TTL/restart. Leave partial reads
+                # uncached so the next ask re-reads the document once the
+                # provider recovers.
+                coverage_complete = all(
+                    c.get("complete", True) for c in coverage_payload
+                )
+                if status == "complete" and not stopped and coverage_complete:
                     answer_cache.set(key, {
                         "answer": answer,
                         "quotes": quotes_payload,

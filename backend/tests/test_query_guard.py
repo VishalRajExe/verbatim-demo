@@ -167,6 +167,23 @@ class _CountingMock(MockClient):
         return super().complete_json(*args, **kwargs)
 
 
+class _FailingExtractMock(MockClient):
+    """Extraction always raises, so every chunk fails and coverage is partial
+    (chunks_read=0). Models a transient provider outage on the read phase."""
+
+    def __init__(self):
+        super().__init__()
+        self.calls = 0
+
+    def stream(self, *args, **kwargs):
+        self.calls += 1
+        yield from super().stream(*args, **kwargs)
+
+    def complete_json(self, *args, **kwargs):
+        self.calls += 1
+        raise RuntimeError("provider unavailable")
+
+
 def _events(text: str) -> list[dict]:
     return [json.loads(line) for line in text.splitlines() if line.strip()]
 
@@ -285,6 +302,44 @@ def test_valid_runs_pipeline_and_duplicate_is_reused(
             assert spy.calls > calls_after_first
         finally:
             client.delete(f"{DOC_API}/{other_doc}")
+    finally:
+        app.dependency_overrides.clear()
+        if conv_id:
+            client.delete(f"/api/conversations/{conv_id}")
+        client.delete(f"{DOC_API}/{doc_id}")
+
+
+def test_partial_coverage_answer_is_not_cached(client: TestClient, tmp_path: Path):
+    """A degraded answer produced over PARTIAL coverage (some chunks failed to
+    read) must never be replayed from the reuse cache: the unread sections could
+    hold the answer, so the next ask has to re-read the document once the
+    provider recovers. Regression for a transient Gemini failure getting frozen
+    into a 30-minute replay."""
+    spy = _FailingExtractMock()
+    app.dependency_overrides[get_llm_dep] = lambda: spy
+    doc_id = _upload_pdf(client, tmp_path, "pc.pdf", [P1, P2])
+    conv_id = None
+    try:
+        q = "What is the liability cap?"
+        first = _events(
+            client.post("/api/ask", json={"documentIds": [doc_id], "question": q}).text
+        )
+        conv_id = first[0]["conversationId"]
+        # Extraction failed -> honest partial coverage, but the stream itself
+        # completed cleanly (status "complete"), which is what used to get cached.
+        cov = next(e for e in first if e["type"] == "coverage")["coverage"][0]
+        assert cov["complete"] is False
+        assert cov["chunksRead"] == 0 and cov["failedChunks"]
+        assert first[-1]["type"] == "done" and first[-1]["status"] == "complete"
+        calls_after_first = spy.calls
+        assert calls_after_first > 0
+
+        # The partial answer must NOT be served from cache: the pipeline re-runs.
+        second = _events(
+            client.post("/api/ask", json={"documentIds": [doc_id], "question": q}).text
+        )
+        assert not second[-1].get("cached")
+        assert spy.calls > calls_after_first
     finally:
         app.dependency_overrides.clear()
         if conv_id:
