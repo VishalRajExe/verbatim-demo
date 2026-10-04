@@ -60,10 +60,13 @@ The frontend derives its API base from `NEXT_PUBLIC_API_URL`
    `legal_contract_intelligence` (or whatever you use in the URL).
 2. Copy the provider connection string into `DATABASE_URL`.
    - PlanetScale / ClearDB give `mysql://user:pass@host:port/db`.
-   - The app automatically rewrites the scheme to `mysql+pymysql://`, so you can
-     paste it as-is.
-   - If SSL is required, append the provider's SSL parameters, e.g.
-     `?ssl_mode=REQUIRED` (PlanetScale) or `?ssl_ca=/path/ca.pem`.
+   - **Aiven** gives `mysql://avnadmin:…@host:22308/defaultdb?ssl-mode=REQUIRED`.
+   - The app automatically rewrites the scheme to `mysql+pymysql://` **and**
+     strips JDBC-only TLS params like `ssl-mode=…` (which PyMySQL rejects with
+     `unexpected keyword argument 'ssl-mode'`), translating them into a proper
+     TLS connection. So you can paste your provider's string **as-is**.
+   - To pin a CA instead of TLS-without-verification, use the real PyMySQL
+     param `ssl_ca=/path/ca.pem` (kept untouched by the normaliser).
 3. **You do not run migrations manually.** On every backend start the app calls
    Alembic (`run_migrations()` in the FastAPI lifespan), upgrading the schema to
    head. The first successful boot creates all tables.

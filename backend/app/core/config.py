@@ -8,8 +8,9 @@ import json
 from functools import lru_cache
 from pathlib import Path
 from typing import Annotated
+from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
 
-from pydantic import field_validator
+from pydantic import field_validator, model_validator
 from pydantic_settings import BaseSettings, NoDecode, SettingsConfigDict
 
 
@@ -32,6 +33,10 @@ class Settings(BaseSettings):
     # fast with a clear error instead of hanging the whole app startup (which on
     # Render otherwise stalls until the 15-minute deploy timeout).
     db_connect_timeout: int = 10
+    # Derived from database_url's query string in _normalise_db below (Aiven /
+    # PlanetScale JDBC-style TLS hints are translated into driver-compatible
+    # connect args rather than passed through verbatim, which PyMySQL rejects).
+    db_ssl_enabled: bool = False
 
     # ─── AI (Gemini) ───
     gemini_api_key: str = ""
@@ -86,20 +91,44 @@ class Settings(BaseSettings):
     def _norm_exts(cls, v):
         return {e.strip().lower() for e in cls._parse_seq(v)}
 
-    @field_validator("database_url", mode="before")
-    @classmethod
-    def _norm_db_url(cls, v):
-        # Managed MySQL providers (PlanetScale / Aiven / Railway / ClearDB) hand
-        # out plain "mysql://" URLs, but SQLAlchemy needs the PyMySQL driver
-        # scheme this app is built around. Normalise the common variants so a
-        # provider connection string works unchanged; leave anything already
-        # dialect-qualified (e.g. mysql+pymysql://) exactly as given.
-        if isinstance(v, str):
-            v = v.strip()
-            for scheme in ("mysql://", "mysql2://", "mariadb://"):
-                if v.startswith(scheme):
-                    return "mysql+pymysql://" + v[len(scheme):]
-        return v
+    @model_validator(mode="after")
+    def _normalise_db(self):
+        # Managed MySQL providers hand out connection strings that SQLAlchemy's
+        # PyMySQL driver cannot use verbatim:
+        #   • plain "mysql://" / "mariadb://" schemes (need the +pymysql driver),
+        #   • JDBC-style TLS params such as "?ssl-mode=REQUIRED" (Aiven) that are
+        #     NOT valid PyMySQL kwargs and crash connect() with
+        #     "unexpected keyword argument 'ssl-mode'".
+        # Normalise both so a provider Service URI pasted as-is just works:
+        # rewrite the scheme, strip the JDBC-only params, and translate an SSL
+        # request into driver-compatible connect args (via db_ssl_enabled). Any
+        # genuinely-supported PyMySQL param (e.g. ssl_ca=/path/ca.pem) is kept.
+        url = self.database_url.strip()
+        for scheme in ("mysql://", "mysql2://", "mariadb://"):
+            if url.startswith(scheme):
+                url = "mysql+pymysql://" + url[len(scheme):]
+                break
+        if url.startswith("mysql"):
+            parts = urlsplit(url)
+            kept: list[tuple[str, str]] = []
+            ssl_requested = False
+            for k, v in parse_qsl(parts.query, keep_blank_values=True):
+                lk = k.lower()
+                if lk in ("ssl-mode", "ssl_mode", "sslmode"):
+                    ssl_requested = ssl_requested or v.upper() not in (
+                        "DISABLED", "FALSE", "NO", "0", "")
+                    continue
+                if lk in ("require_ssl", "requiressl", "use_ssl", "usessl"):
+                    ssl_requested = ssl_requested or v.lower() in (
+                        "true", "1", "yes", "required")
+                    continue
+                kept.append((k, v))
+            url = urlunsplit(
+                (parts.scheme, parts.netloc, parts.path, urlencode(kept), parts.fragment)
+            )
+            self.db_ssl_enabled = self.db_ssl_enabled or ssl_requested
+        self.database_url = url
+        return self
 
     @property
     def max_file_size_bytes(self) -> int:

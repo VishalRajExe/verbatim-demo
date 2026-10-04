@@ -58,8 +58,7 @@ def test_allowed_extensions_parsing(raw, expected):
 @pytest.mark.parametrize(
     "raw,expected",
     [
-        ("mysql://u:p@h:3306/db?ssl_mode=REQUIRED",
-         "mysql+pymysql://u:p@h:3306/db?ssl_mode=REQUIRED"),
+        ("mysql://u:p@h:3306/db", "mysql+pymysql://u:p@h:3306/db"),
         ("mariadb://u:p@h/db", "mysql+pymysql://u:p@h/db"),
         ("mysql+pymysql://u:p@h/db", "mysql+pymysql://u:p@h/db"),
     ],
@@ -77,3 +76,48 @@ def test_db_connect_args_bounds_mysql_only():
     assert db_connect_args("mysql://u@h/db") == {"connect_timeout": t}
     assert db_connect_args("sqlite:///test.db") == {}
     assert db_connect_args("postgresql+psycopg://u@h/db") == {}
+
+
+def test_db_connect_args_enables_tls_when_requested(monkeypatch):
+    import app.db.session as sess
+
+    monkeypatch.setattr(sess.settings, "db_ssl_enabled", True)
+    args = sess.db_connect_args("mysql+pymysql://u@h/db")
+    assert args["connect_timeout"] == sess.settings.db_connect_timeout
+    assert args["ssl"] == {"ca": None}
+
+
+@pytest.mark.parametrize(
+    "raw,expected_url,expected_ssl",
+    [
+        # Aiven's JDBC-style URI: scheme rewritten, invalid ssl-mode dropped, TLS flagged.
+        ("mysql://avnadmin:p@ss@host:22308/defaultdb?ssl-mode=REQUIRED",
+         "mysql+pymysql://avnadmin:p@ss@host:22308/defaultdb", True),
+        # Explicitly disabled -> no TLS requested.
+        ("mysql+pymysql://u:p@h/db?ssl_mode=DISABLED",
+         "mysql+pymysql://u:p@h/db", False),
+        # Unrelated params are preserved while the bad one is stripped.
+        ("mysql://u:p@h/db?charset=utf8mb4&ssl-mode=REQUIRED",
+         "mysql+pymysql://u:p@h/db?charset=utf8mb4", True),
+        # A real PyMySQL param (ssl_ca) is left untouched and does not set the flag.
+        ("mysql://u:p@h/db?ssl_ca=/etc/ca.pem",
+         "mysql+pymysql://u:p@h/db", False),
+    ],
+)
+def test_database_url_aiven_normalisation(raw, expected_url, expected_ssl):
+    s = _settings(database_url=raw)
+    # Compare without the ssl_ca value (urlencode percent-encodes the path; the
+    # driver decodes it back, so only assert the key survives for that case).
+    if "ssl_ca" in raw:
+        assert s.database_url.startswith(expected_url.split("?")[0] + "?ssl_ca=")
+        assert "ssl-mode" not in s.database_url
+    else:
+        assert s.database_url == expected_url
+    assert s.db_ssl_enabled is expected_ssl
+
+
+def test_database_url_ssl_mode_never_reaches_pymysql_kwargs():
+    # The regression: passing the URI through must not leave 'ssl-mode' anywhere
+    # in the final URL query (that kwarg is what crashed connect()).
+    s = _settings(database_url="mysql://u:p@h:3306/db?ssl-mode=REQUIRED")
+    assert "ssl-mode" not in s.database_url and "ssl_mode" not in s.database_url

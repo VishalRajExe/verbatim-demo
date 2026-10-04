@@ -13,10 +13,16 @@ settings = get_settings()
 
 def db_connect_args(url: str) -> dict:
     """Driver-specific connect args. For MySQL we bound the connect/AUTH
-    handshake so an unreachable host raises quickly instead of hanging startup.
-    Other backends (e.g. SQLite in tests) get no extra args."""
+    handshake so an unreachable host raises quickly instead of hanging startup,
+    and enable TLS when the (normalised) DATABASE_URL requested it. Other
+    backends (e.g. SQLite in tests) get no extra args."""
     if url.startswith("mysql"):
-        return {"connect_timeout": settings.db_connect_timeout}
+        args: dict = {"connect_timeout": settings.db_connect_timeout}
+        if settings.db_ssl_enabled:
+            # TLS without pinning a specific CA file (matches Aiven's
+            # "ssl-mode=REQUIRED"). Provide ssl_ca=... in the URL to verify.
+            args["ssl"] = {"ca": None}
+        return args
     return {}
 
 
