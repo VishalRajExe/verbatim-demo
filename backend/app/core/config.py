@@ -4,11 +4,13 @@ Single source of truth for environment-derived settings. Loads from backend/.env
 """
 from __future__ import annotations
 
+import json
 from functools import lru_cache
 from pathlib import Path
+from typing import Annotated
 
 from pydantic import field_validator
-from pydantic_settings import BaseSettings, SettingsConfigDict
+from pydantic_settings import BaseSettings, NoDecode, SettingsConfigDict
 
 
 class Settings(BaseSettings):
@@ -36,25 +38,49 @@ class Settings(BaseSettings):
 
     # ─── Upload / processing ───
     max_file_size_mb: int = 80
-    allowed_extensions: set[str] = {".pdf", ".docx"}
+    allowed_extensions: Annotated[set[str], NoDecode] = {".pdf", ".docx"}
     chunk_size_words: int = 200
     chunk_overlap_words: int = 40
     chunk_max_chars: int = 96000          # ~24k tokens of canonical text per extract call
 
     # ─── Server ───
-    cors_origins: list[str] = ["http://localhost:3000"]
+    # NoDecode stops pydantic-settings from JSON-decoding the raw env value (which
+    # crashes on a comma-separated CORS_ORIGINS); _parse_seq below handles it.
+    cors_origins: Annotated[list[str], NoDecode] = ["http://localhost:3000"]
     api_prefix: str = "/api"
 
     @property
     def uploads_dir(self) -> Path:
         return self.storage_dir / "uploads"
 
+    @staticmethod
+    def _parse_seq(v, cast=str):
+        # Accept a real list/set (defaults, tests) or a string in either JSON
+        # array form ('["a","b"]') or comma/space separated form ('a,b'). This
+        # keeps deployment env vars forgiving across providers.
+        if isinstance(v, (list, set, tuple, frozenset)):
+            return [cast(x) for x in v]
+        if isinstance(v, str):
+            s = v.strip()
+            if not s:
+                return []
+            if s.startswith("["):
+                try:
+                    return [cast(x) for x in json.loads(s)]
+                except (ValueError, TypeError):
+                    pass
+            return [cast(p.strip()) for p in s.replace("\n", ",").split(",") if p.strip()]
+        return v
+
+    @field_validator("cors_origins", mode="before")
+    @classmethod
+    def _norm_cors(cls, v):
+        return cls._parse_seq(v)
+
     @field_validator("allowed_extensions", mode="before")
     @classmethod
     def _norm_exts(cls, v):
-        if isinstance(v, str):
-            return {e.strip().lower() for e in v.split(",") if e.strip()}
-        return v
+        return {e.strip().lower() for e in cls._parse_seq(v)}
 
     @field_validator("database_url", mode="before")
     @classmethod

@@ -199,7 +199,7 @@ identically in both providers because it is provider-independent.
 | Build fails: `metadata-generation-failed ╰─> rapidfuzz` / `Extra keys present in "project"` | Render's native buildpack used **Python 3.14** (no cp314 wheels → source build) | Deploy via the **Docker** runtime (`render.yaml` now does); the image pins `python:3.12`. |
 | `cryptography`/`PyMuPDF` build errors on deploy | Using an interpreter with no prebuilt wheels | Use Python 3.12 (as pinned) or the provided Dockerfile. |
 | Frontend loads, API calls fail | `NEXT_PUBLIC_API_URL` wrong or not rebuilt | Set it and **redeploy** the frontend (build-time var). |
-| CORS errors in console | Frontend origin not in `CORS_ORIGINS` | Add exact origin; restart backend. |
+| CORS errors in console | Frontend origin not in `CORS_ORIGINS` | Add exact origin; restart backend. `CORS_ORIGINS` accepts a JSON array (`["https://a","https://b"]`) **or** a comma-separated list (`https://a,https://b`). |
 | Uploaded file / redline download 404 after a while | Ephemeral filesystem wiped | Use a persistent disk / object storage (§6). |
 | Streaming answer stalls or times out | Free-tier spin-down or proxy buffering | Use a paid plan for always-on; backend already sends `X-Accel-Buffering: no`. |
 | "Bad gateway" briefly after deploy | Cold start / migrations running | Wait for `/api/health` to return `ok`. |
