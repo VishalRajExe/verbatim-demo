@@ -72,7 +72,10 @@ class ProposeResult:
 
 def _docx_paragraph_text(source: bytes) -> tuple[DocxDocument, str]:
     document = DocxDocument(io.BytesIO(source))
-    text = "\n".join(p.text for p in document.paragraphs)
+    # Use the same full-body source the verifier counts against (paragraphs +
+    # table cells), so the value precondition never rejects a value that is
+    # present in the document but hidden from ``document.paragraphs``.
+    text = "\n".join(paragraph_texts(document))
     return document, text
 
 
@@ -103,7 +106,7 @@ def propose_redline(
             if actual:
                 msg += f' For example, the document contains "{actual}".'
             msg += " No changes were proposed for it."
-            result.dropped.append({"target": expected, "reason": msg})
+            result.dropped.append({"target": expected, "reason": msg, "kind": "not_found"})
         else:
             satisfied.append(intent)
     if intents and not satisfied:
@@ -146,6 +149,7 @@ def propose_redline(
                     "target": target,
                     "reason": "The proposed target text was not found verbatim "
                     "in the document. Nothing was changed.",
+                    "kind": "not_found",
                 }
             )
             continue
@@ -180,17 +184,21 @@ def propose_redline(
                         "target": target,
                         "reason": "The target text appears more than once, so the "
                         "edit is ambiguous. Nothing was changed.",
+                        "kind": "ambiguous",
+                        "occurrences": occ,
                     }
                 )
                 continue
         if (target, resolved_context) in seen:
             result.dropped.append(
-                {"target": target, "reason": "Duplicate of an earlier proposal."}
+                {"target": target, "reason": "Duplicate of an earlier proposal.",
+                 "kind": "duplicate"}
             )
             continue
         if replacement and replacement == target:
             result.dropped.append(
-                {"target": target, "reason": "No-op: replacement equals the target."}
+                {"target": target, "reason": "No-op: replacement equals the target.",
+                 "kind": "noop"}
             )
             continue
         if not _matches_intents(target, satisfied):
@@ -203,6 +211,7 @@ def propose_redline(
                     "reason": f"The proposed edit does not contain the original "
                     f'value "{expected_label}" named in the instruction. '
                     "Nothing was changed.",
+                    "kind": "mismatch",
                 }
             )
             continue
@@ -229,7 +238,7 @@ def propose_redline(
                 "No clause clearly matching the requested change was found, or it "
                 "already satisfies the instruction. Nothing was proposed."
             )
-        result.dropped.append({"target": trimmed, "reason": reason})
+        result.dropped.append({"target": trimmed, "reason": reason, "kind": "not_found"})
     return result
 
 

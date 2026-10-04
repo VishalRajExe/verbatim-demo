@@ -32,6 +32,21 @@ def _para_text(p) -> str:
     return "".join(t.text or "" for r in p.findall(qn("w:r")) for t in r.findall(qn("w:t")))
 
 
+def _iter_paragraphs(document: Document) -> list[Paragraph]:
+    """Every paragraph in the document body, in reading order, INCLUDING the
+    paragraphs that live inside tables.
+
+    ``document.paragraphs`` returns only top-level body paragraphs and silently
+    omits table cells, so a value that appears only in a table (fee schedules,
+    notice periods, escalation targets ...) would be invisible to verification
+    and un-editable - the redline would then check a *different, incomplete*
+    view of the file than the one the viewer/extractor and the RAG text show.
+    Walking every ``w:p`` under the body keeps the run tree the redline edits in
+    sync with the content that is actually displayed, for any DOCX."""
+    body = document.element.body
+    return [Paragraph(p, document) for p in body.iter(qn("w:p"))]
+
+
 def _make(tag: str, parent, **attrib):
     el = parent.makeelement(qn(tag), {})
     for k, v in attrib.items():
@@ -84,7 +99,7 @@ def _runs_of(p):
 
 
 def find_paragraph_with_target(document: Document, target: str) -> tuple[int, Paragraph] | tuple[None, None]:
-    for i, para in enumerate(document.paragraphs):
+    for i, para in enumerate(_iter_paragraphs(document)):
         if target in _para_text(para._p):
             return i, para
     return None, None
@@ -105,7 +120,7 @@ def _paragraph_for_target(
     if context:
         hits = [
             (i, para)
-            for i, para in enumerate(document.paragraphs)
+            for i, para in enumerate(_iter_paragraphs(document))
             if context in _para_text(para._p) and target in _para_text(para._p)
         ]
         if len(hits) == 1:
@@ -115,7 +130,7 @@ def _paragraph_for_target(
 
 def count_occurrences(document: Document, target: str) -> int:
     total = 0
-    for para in document.paragraphs:
+    for para in _iter_paragraphs(document):
         total += _para_text(para._p).count(target)
     return total
 
@@ -124,7 +139,7 @@ def paragraph_texts(document: Document) -> list[str]:
     """Plain text of every paragraph, from the same run-joined source that
     ``count_occurrences`` matches against. Callers use these as verbatim context
     anchors, so the strings must be consistent with the uniqueness check."""
-    return [_para_text(para._p) for para in document.paragraphs]
+    return [_para_text(para._p) for para in _iter_paragraphs(document)]
 
 
 def apply_tracked_edit(

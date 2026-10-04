@@ -798,7 +798,7 @@ export async function proposeRedline(input: ProposeInput): Promise<RedlineEdit[]
       occurrences: number;
       verified: boolean;
     }>;
-    dropped: Array<{ target: string; reason: string }>;
+    dropped: Array<{ target: string; reason: string; kind?: string }>;
   }>(res);
 
   const edits: RedlineEdit[] = [
@@ -817,7 +817,9 @@ export async function proposeRedline(input: ProposeInput): Promise<RedlineEdit[]
       target: e.target,
       replacement: "",
       reason: e.reason,
-      check: "not_found" as const,
+      // The backend reports why an edit was dropped; an ambiguous target (found
+      // more than once) is distinct from a target that isn't in the document.
+      check: e.kind === "ambiguous" ? ("ambiguous" as const) : ("not_found" as const),
       note: e.reason,
       context: null,
     })),

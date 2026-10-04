@@ -109,5 +109,34 @@ def test_target_must_occur_exactly_once(tmp_path: Path) -> None:
         apply_tracked_edit(doc, "Fee is due.", "Amount is payable.")
 
 
+def test_table_content_is_visible_and_editable(tmp_path: Path) -> None:
+    """A value that lives only inside a table cell must be part of the document
+    the redline verifies and edits - the viewer/extractor show table content, so
+    the run tree the redline walks has to include it too (regression: the
+    verification used ``document.paragraphs``, which silently omits tables)."""
+    from app.services.redlining.tracked_changes import count_occurrences, paragraph_texts
+
+    src = tmp_path / "tbl.docx"
+    doc = Document()
+    doc.add_paragraph("6. Operational Table")
+    table = doc.add_table(rows=2, cols=2)
+    table.cell(0, 0).text = "Item"
+    table.cell(0, 1).text = "Requirement"
+    table.cell(1, 0).text = "Payment review period"
+    table.cell(1, 1).text = "6 business days"
+    doc.save(str(src))
+
+    doc = Document(str(src))
+    assert "6 business days" in paragraph_texts(doc)
+    assert count_occurrences(doc, "6 business days") == 1
+
+    edit = apply_tracked_edit(doc, "6 business days", "10 business days")
+    out = io.BytesIO()
+    doc.save(out)
+    ins, dele = count_tracked_changes(out.getvalue())
+    assert (ins, dele) == (1, 1)
+    assert edit.target == "6 business days"
+
+
 if __name__ == "__main__":  # pragma: no cover
     raise SystemExit(pytest.main([__file__, "-q"]))
