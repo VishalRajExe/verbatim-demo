@@ -6,6 +6,7 @@ tree); edits that don't target exactly one occurrence are dropped and reported.
 """
 from __future__ import annotations
 
+import logging
 import uuid
 from pathlib import Path
 
@@ -25,7 +26,7 @@ from app.schemas.assistant import (
     RedlineRequest,
 )
 from app.services.ai.client import LLMClient
-from app.services.ai.retry import LLMError
+from app.services.ai.retry import LLMError, friendly_message
 from app.services.qa.guard import (
     REDLINE_UNUSABLE_MESSAGE,
     is_usable_redline_instruction,
@@ -34,6 +35,7 @@ from app.services.redlining.propose import propose_redline
 from app.services.redlining.service import Edit, apply_redlines
 
 router = APIRouter(tags=["redlines"])
+logger = logging.getLogger(__name__)
 
 _DOCX_MIME = (
     "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
@@ -96,7 +98,11 @@ def propose_redline_edits(
     try:
         result = propose_redline(db, doc, body.instruction, llm, src.read_bytes())
     except LLMError as exc:
-        raise HTTPException(502, exc.message)
+        # Full provider detail goes to the server log; the client gets a plain,
+        # safe message (never the raw quota/JSON blob, which leaks internals and
+        # is unreadable). 503 = upstream service unavailable, retry later.
+        logger.warning("redline propose failed: %s", exc)
+        raise HTTPException(503, friendly_message(exc))
     except Exception as exc:  # noqa: BLE001 - clean 500, no internals leaked
         raise HTTPException(500, "Could not analyse the document for edits.") from exc
     data = result.to_dict()

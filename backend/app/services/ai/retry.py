@@ -24,6 +24,39 @@ class LLMError(Exception):
         return f"LLMError(status={self.status}): {self.message}"
 
 
+# Substrings that mark a provider "too many requests / out of quota" failure
+# across the phrasings Google (and other vendors) use. Matched case-insensitively.
+_QUOTA_HINTS = (
+    "resource_exhausted",
+    "resource exhausted",
+    "quota",
+    "rate limit",
+    "ratelimit",
+    "too many requests",
+)
+
+
+def friendly_message(exc: LLMError) -> str:
+    """A short, user-safe description of an LLM failure.
+
+    The raw provider payload (``exc.message``) is deliberately NOT returned: it
+    is unreadable to end users and can leak internal request/limit details. The
+    full error is still logged server-side where it belongs. This keeps the
+    honest-status principle (tell the user it failed and why, in plain terms)
+    without fabricating a result or exposing internals."""
+    low = (exc.message or "").lower()
+    if exc.status == 429 or any(h in low for h in _QUOTA_HINTS):
+        return (
+            "The AI service is rate-limited right now — its daily request quota "
+            "has been reached. Please try again in a little while."
+        )
+    if exc.status in (401, 403):
+        return "The AI service is unavailable right now. Please try again later."
+    if exc.status in (500, 502, 503, 504) or exc.status is None:
+        return "The AI service is temporarily unavailable. Please try again."
+    return "The AI service could not complete this request. Please try again."
+
+
 def is_retryable(err: Exception) -> bool:
     if isinstance(err, LLMError):
         return err.status in RETRYABLE_STATUS or err.status is None

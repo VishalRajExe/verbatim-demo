@@ -238,5 +238,40 @@ def test_repeated_target_with_context_resolves_to_correct_clause(
         client.delete(f"{API}/{doc_id}")
 
 
+def test_llm_failure_returns_clean_message_not_raw_blob(client, client_app, tmp_path):
+    """A provider error (e.g. Gemini 429 quota) must surface as a short, safe
+    message — never the raw provider payload dumped into the UI."""
+    from app.services.ai.retry import LLMError
+
+    class ExplodingLLM:
+        def complete_json(self, prompt):
+            raise LLMError(
+                status=429,
+                message="429 RESOURCE_EXHAUSTED. {'error': {'message': "
+                "'You exceeded your current quota'}}",
+            )
+
+        def complete(self, prompt):  # pragma: no cover
+            return "{}"
+
+        def stream(self, prompt):  # pragma: no cover
+            yield from ()
+
+    client_app.dependency_overrides[get_llm_dep] = lambda: ExplodingLLM()
+    doc_id = _ready_docx(client, tmp_path, [PAY_P, TERM_P])
+    try:
+        resp = client.post(
+            f"{API}/{doc_id}/redline/propose",
+            json={"instruction": INSTRUCTION},
+        )
+        assert resp.status_code == 503, resp.text
+        detail = resp.json()["detail"]
+        assert "RESOURCE_EXHAUSTED" not in detail  # no internal leak
+        assert "{" not in detail
+        assert "quota" in detail.lower() or "rate-limit" in detail.lower()
+    finally:
+        client.delete(f"{API}/{doc_id}")
+
+
 if __name__ == "__main__":  # pragma: no cover
     raise SystemExit(pytest.main([__file__, "-q"]))

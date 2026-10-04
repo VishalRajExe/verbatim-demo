@@ -5,7 +5,12 @@ from __future__ import annotations
 import pytest
 
 from app.services.ai.json_parse import parse_json_lenient
-from app.services.ai.retry import LLMError, is_retryable, retry_call
+from app.services.ai.retry import (
+    LLMError,
+    friendly_message,
+    is_retryable,
+    retry_call,
+)
 from app.services.qa.chunker import chunk_text, coverage_of
 from app.services.qa.cite_filter import CitationFilter
 from app.services.qa.coverage import DocumentCoverage, caveat, not_found_message
@@ -90,6 +95,33 @@ def test_is_retryable_classification():
     assert is_retryable(ConnectionError()) is True
     assert is_retryable(LLMError(status=None)) is True
     assert is_retryable(LLMError(status=400)) is False
+
+
+# ── friendly_message (no raw provider leak) ───────────────────────────────────
+
+RAW_BLOB = (
+    "429 RESOURCE_EXHAUSTED. {'error': {'code': 429, 'message': "
+    "'You exceeded your current quota', 'status': 'RESOURCE_EXHAUSTED'}}"
+)
+
+
+def test_friendly_message_maps_quota_to_plain_text():
+    msg = friendly_message(LLMError(status=429, message=RAW_BLOB))
+    assert "quota" in msg.lower() or "rate-limit" in msg.lower()
+    # the raw provider payload must never reach the user-facing message
+    assert "RESOURCE_EXHAUSTED" not in msg
+    assert "{" not in msg
+
+
+def test_friendly_message_detects_quota_from_text_without_status():
+    msg = friendly_message(LLMError(status=None, message="Quota exceeded for metric"))
+    assert "quota" in msg.lower() or "rate-limit" in msg.lower()
+
+
+def test_friendly_message_never_leaks_raw_for_other_statuses():
+    for status in (401, 403, 500, 503, None):
+        msg = friendly_message(LLMError(status=status, message=RAW_BLOB))
+        assert msg and "RESOURCE_EXHAUSTED" not in msg and "{" not in msg
 
 
 # ── cite_filter ───────────────────────────────────────────────────────────────
