@@ -5,6 +5,8 @@ from pathlib import Path
 
 from fastapi.testclient import TestClient
 
+from app.db.session import SessionLocal
+from app.models.document import Document
 from tests.helpers import make_docx, make_scanned_pdf, make_text_pdf
 
 TERMS = (
@@ -91,3 +93,36 @@ def test_reject_content_mismatch(client: TestClient) -> None:
     # Named .pdf but not actually a PDF -> caught by signature sniffing.
     resp = _upload(client, "evil.pdf", b"PK-not-a-real-pdf-content-here")
     assert resp.status_code == 400
+
+
+def test_file_and_locate_survive_ephemeral_disk_wipe(client: TestClient, tmp_path: Path) -> None:
+    # Render's instance disk is wiped on redeploy/idle shutdown while the DB row
+    # persists. Simulate that by deleting the on-disk upload after processing,
+    # then confirm the durable copy still serves the file and citation geometry
+    # instead of 404-ing until re-upload.
+    pdf = make_text_pdf(tmp_path / "contract.pdf", [TERMS, LIABILITY])
+    doc_id = _upload(client, "contract.pdf", pdf.read_bytes(), "application/pdf").json()["id"]
+    try:
+        assert client.get(f"{API}/{doc_id}").json()["status"] == "ready"
+        # Sanity: while the disk copy is present, /file works and backfills the
+        # durable row; then remove the disk copy to force the fallback path.
+        assert client.get(f"{API}/{doc_id}/file").status_code == 200
+        db = SessionLocal()
+        try:
+            stored = Path(db.get(Document, doc_id).file_path)
+        finally:
+            db.close()
+        stored.unlink(missing_ok=True)
+        assert not stored.exists()
+
+        served = client.get(f"{API}/{doc_id}/file")
+        assert served.status_code == 200
+        assert served.content[:4] == b"%PDF", "bytes must come from the durable copy"
+
+        # A canonical range inside the extracted text must still resolve to page
+        # geometry from the persisted bytes (not SourceFileMissing -> 404).
+        located = client.get(f"{API}/{doc_id}/locate", params={"ranges": "0-40"})
+        assert located.status_code == 200
+        assert located.json()["locations"]
+    finally:
+        client.delete(f"{API}/{doc_id}")

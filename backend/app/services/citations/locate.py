@@ -15,7 +15,7 @@ from pathlib import Path
 import fitz  # PyMuPDF
 from sqlalchemy.orm import Session
 
-from app.models.document import Document
+from app.models.document import Document, DocumentBlob
 from app.services.citations.service import canonical_for_document
 
 _EPS = 1.0  # tolerance when deciding if a word overlaps a page slice
@@ -62,11 +62,16 @@ def locate_ranges(
     results: list[dict] = []
     if doc.file_type == ".pdf":
         source = Path(doc.file_path)
-        if not source.is_file():
-            # Open must not be attempted on a missing path: PyMuPDF raises a
-            # raw OSError that escapes as an opaque HTTP 500.
-            raise SourceFileMissingError(document_id)
-        pdf = fitz.open(str(source))
+        if source.is_file():
+            pdf = fitz.open(str(source))
+        else:
+            # Ephemeral-disk wipe: the extracted text survived in the DB, and so
+            # can the original bytes, so geometry still resolves. Only when the
+            # durable copy is missing too is there genuinely nothing to open.
+            blob = db.get(DocumentBlob, document_id)
+            if blob is None:
+                raise SourceFileMissingError(document_id)
+            pdf = fitz.open(stream=blob.data, filetype="pdf")
         try:
             for start, end in ranges:
                 results.extend(_locate_pdf(pdf, canonical, page_ranges, start, end))

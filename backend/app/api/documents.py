@@ -19,7 +19,7 @@ from sqlalchemy.orm import Session
 
 from app.core.config import get_settings
 from app.db.session import get_db
-from app.models.document import Document, DocumentPage, DocumentStatus
+from app.models.document import Document, DocumentBlob, DocumentPage, DocumentStatus
 from app.schemas.document import (
     DocumentListOut,
     DocumentOut,
@@ -99,6 +99,20 @@ async def upload_document(
     )
     db.add(doc)
     db.commit()
+
+    # Persist a durable copy of the bytes. Render's instance filesystem is
+    # ephemeral (wiped on redeploy and free-tier idle shutdown) while this row
+    # lives in the shared MySQL database, so the document stays viewable and
+    # citable for its whole life instead of 404-ing until the user re-uploads.
+    # Best-effort: an oversized payload (e.g. past MySQL max_allowed_packet)
+    # must not fail an otherwise-valid upload - the on-disk copy still serves
+    # now, and /file backfills the durable row on the next read while it lives.
+    try:
+        db.add(DocumentBlob(document_id=doc_id, data=dest.read_bytes()))
+        db.commit()
+    except Exception:  # noqa: BLE001 - durability is best-effort, not required
+        db.rollback()
+        logger.warning("Could not persist durable bytes for %s", doc_id, exc_info=True)
 
     background_tasks.add_task(process_document, doc_id)
 
@@ -196,17 +210,34 @@ def locate_document_ranges(
 
 
 @router.get("/{doc_id}/file")
-def get_document_file(doc_id: str, db: Session = Depends(get_db)) -> FileResponse:
+def get_document_file(doc_id: str, db: Session = Depends(get_db)) -> Response:
     doc = db.get(Document, doc_id)
     if doc is None:
         raise HTTPException(404, "Document not found.")
-    path = Path(doc.file_path)
-    if not path.exists():
-        raise HTTPException(404, "Source file not found on storage.")
     media = "application/pdf" if doc.file_type == ".pdf" else (
         "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
     )
-    return FileResponse(path, media_type=media, filename=doc.filename)
+    path = Path(doc.file_path)
+    if path.exists():
+        # Opportunistically backfill the durable copy the first time a
+        # still-present upload is served, so documents stored before this
+        # feature no longer depend on the ephemeral filesystem.
+        if db.get(DocumentBlob, doc_id) is None:
+            try:
+                db.add(DocumentBlob(document_id=doc_id, data=path.read_bytes()))
+                db.commit()
+            except OSError:  # unreadable file: serve what the client can get
+                pass
+        return FileResponse(path, media_type=media, filename=doc.filename)
+    # Disk copy gone (instance recycled): replay the bytes from the database.
+    blob = db.get(DocumentBlob, doc_id)
+    if blob is not None:
+        return Response(
+            content=blob.data,
+            media_type=media,
+            headers={"Content-Disposition": f'attachment; filename="{doc.filename}"'},
+        )
+    raise HTTPException(404, "Source file not found on storage.")
 
 
 @router.delete("/{doc_id}", status_code=204)

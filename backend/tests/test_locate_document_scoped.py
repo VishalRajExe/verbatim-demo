@@ -7,8 +7,9 @@ against the document it belongs to. A range that is valid in a large document
 this document" instead of opening the wrong document's page.
 
 It also pins the second half of that honesty rule: a document whose stored
-source file has disappeared must report THAT, not an empty location list and not
-an unhandled crash.
+source file has disappeared is rescued by the durable database copy (so viewing
+and geometry keep working across an ephemeral-disk wipe), and only when that
+copy is gone too must the API report the absence — never an unhandled crash.
 """
 from __future__ import annotations
 
@@ -17,7 +18,7 @@ from pathlib import Path
 from fastapi.testclient import TestClient
 
 from app.db.session import SessionLocal
-from app.models.document import Document
+from app.models.document import Document, DocumentBlob
 from tests.helpers import make_text_pdf
 
 API = "/api/documents"
@@ -119,32 +120,47 @@ def test_locate_rejects_out_of_bounds_and_malformed_ranges(
 def test_missing_source_file_is_reported_not_crashed(
     client: TestClient, tmp_path: Path
 ) -> None:
-    # Bug #8: a document row can outlive its stored file (repo moved, storage
-    # restored from another machine). The extracted text is still in the
-    # database, so /locate used to call PyMuPDF on a dead path and raise a raw
-    # FileNotFoundError -> HTTP 500. The browser then blamed CORS and the drawer
-    # claimed the verified citation was "not found in this document".
+    # A document row can outlive its ephemeral on-disk file (Render wipes the
+    # instance disk on redeploy / idle shutdown; historically a repo move or a
+    # storage restore did too). The durable database copy now covers that case:
+    # /locate and /file resolve from the persisted bytes instead of 404-ing.
+    # Only when BOTH the disk file and the durable row are gone must the API
+    # report the absence honestly (404) - never a raw PyMuPDF FileNotFoundError
+    # that escapes as an opaque HTTP 500 and makes the drawer doubt a verified
+    # citation.
     a_id = _ready(client, tmp_path / "a.pdf", "a.pdf", [A1, A2])
     primary = _verify(client, a_id, A2)
+    rng = f"{primary['start']}-{primary['end']}"
     db = SessionLocal()
     try:
         stored = Path(db.get(Document, a_id).file_path)
     finally:
         db.close()
-    stored.rename(stored.with_suffix(".gone"))  # file disappears, row survives
+    stored.rename(stored.with_suffix(".gone"))  # disk copy disappears, row survives
     try:
-        located = client.get(
-            f"{API}/{a_id}/locate",
-            params={"ranges": f"{primary['start']}-{primary['end']}"},
-        )
-        assert located.status_code == 404, located.text
-        assert "Source file not found on storage" in located.text
-        # Same contract as the file endpoint, which already checked this.
-        assert client.get(f"{API}/{a_id}/file").status_code == 404
+        # Durable copy present: geometry and file serving still work from it.
+        located = client.get(f"{API}/{a_id}/locate", params={"ranges": rng})
+        assert located.status_code == 200, located.text
+        assert located.json()["locations"], "durable bytes must resolve geometry"
+        assert client.get(f"{API}/{a_id}/file").status_code == 200
         # Text-based retrieval is unaffected: the quote is still verifiable.
         assert client.post(
             f"{API}/{a_id}/verify", json={"quote": A2}
         ).json()["verified"] is True
+
+        # Drop the durable copy too: now genuinely gone -> honest 404, not 500.
+        db = SessionLocal()
+        try:
+            db.query(DocumentBlob).filter(
+                DocumentBlob.document_id == a_id
+            ).delete(synchronize_session=False)
+            db.commit()
+        finally:
+            db.close()
+        gone = client.get(f"{API}/{a_id}/locate", params={"ranges": rng})
+        assert gone.status_code == 404, gone.text
+        assert "Source file not found on storage" in gone.text
+        assert client.get(f"{API}/{a_id}/file").status_code == 404
     finally:
         stored.with_suffix(".gone").rename(stored)
         client.delete(f"{API}/{a_id}")

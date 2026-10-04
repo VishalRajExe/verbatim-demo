@@ -12,11 +12,12 @@ from sqlalchemy import (
     Enum,
     ForeignKey,
     Integer,
+    LargeBinary,
     String,
     Text,
     func,
 )
-from sqlalchemy.dialects.mysql import MEDIUMTEXT
+from sqlalchemy.dialects.mysql import LONGBLOB, MEDIUMTEXT
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from app.db.session import Base
@@ -60,6 +61,36 @@ class Document(Base):
         cascade="all, delete-orphan",
         order_by="DocumentPage.page_number",
     )
+    # Durable copy of the original upload bytes. Kept in its own table so the
+    # multi-megabyte payload is never pulled into the many hot-path queries
+    # that load Document rows (listing, status polling, the QA pipeline).
+    blob: Mapped["DocumentBlob | None"] = relationship(
+        back_populates="document",
+        cascade="all, delete-orphan",
+        uselist=False,
+    )
+
+
+class DocumentBlob(Base):
+    """The raw uploaded file, persisted so it survives an ephemeral-disk wipe.
+
+    Render's instance filesystem (where ``Document.file_path`` points) is reset
+    on redeploy and on free-tier idle shutdown, while this row lives in the
+    shared MySQL database. Serving and citation geometry fall back to these
+    bytes when the on-disk file is gone, so a document stops 404-ing until the
+    user re-uploads.
+    """
+
+    __tablename__ = "document_blobs"
+
+    document_id: Mapped[str] = mapped_column(
+        ForeignKey("documents.id", ondelete="CASCADE"), primary_key=True
+    )
+    data: Mapped[bytes] = mapped_column(
+        LargeBinary().with_variant(LONGBLOB, "mysql"), nullable=False
+    )
+
+    document: Mapped[Document] = relationship(back_populates="blob")
 
 
 class DocumentPage(Base):
