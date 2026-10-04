@@ -11,7 +11,7 @@ Word document with native tracked changes.
 
 | | |
 |---|---|
-| **Live demo** | https://verbatim-demo.onrender.com  ·  health: https://verbatim-demo.onrender.com/health |
+| **Live demo** | https://verbatim-demo.onrender.com  |
 | **Stack** | Next.js · React · TypeScript · Tailwind → FastAPI · Pydantic · SQLAlchemy → MySQL · Google Gemini · PyMuPDF · python-docx · lxml |
 | **Tests** | Backend **233 passing** (`pytest -q`) · Frontend `npm run build` clean (0 type errors) |
 
