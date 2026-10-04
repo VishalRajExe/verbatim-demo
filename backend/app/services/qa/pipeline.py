@@ -237,10 +237,21 @@ def ask_stream(
         verified = keep if keep else verified
     else:
         if page_constraints:
+            # A page reference is a genuine user constraint: evidence from
+            # other pages answers a question that was not asked, so it is
+            # dropped for real (the not-found wording then reflects it).
             verified = [
                 v for v in verified
                 if page_constraints & set(range(v["pageStart"], v["pageEnd"] + 1))
             ]
+        # The focus floors below are an anti-pollution heuristic, NOT proof of
+        # absence. Snapshot the extractor's verified, page-valid evidence so a
+        # floor that would discard ALL of it can be undone: the lexical gate
+        # fails on ordinary structures (a clause whose body never repeats its
+        # own heading keyword, a synonym, a stray interrogative inflating the
+        # term count) and silently turning real, verified evidence into a
+        # confident "does not appear to be addressed" violates invariant I-5.
+        pre_focus = verified
         if focus_terms:
             # A quote that matches NONE of the question's substantive terms
             # answers nothing asked; it never reaches composition, even when the
@@ -262,6 +273,15 @@ def ask_stream(
             verified = [
                 v for v in verified if focus_hits(v["text"], focus_terms) >= need
             ]
+        if focus_terms and not page_constraints and not verified and pre_focus:
+            # The floors emptied the set while the extractor had verified real
+            # evidence: it threw out the answer, not the noise. Mirror the
+            # compound branch above and hand the pre-floor evidence to ranking
+            # and composition, which decide relevance better than a veto here.
+            # Only for unconstrained reads: when the question names a page, the
+            # floor has genuinely judged that page's content, so an empty set is
+            # an honest "nothing relevant here" and must not be revived.
+            verified = pre_focus
 
     # Number verified quotes and emit the quote + coverage events.
     verified = _rank_quotes(verified, question)

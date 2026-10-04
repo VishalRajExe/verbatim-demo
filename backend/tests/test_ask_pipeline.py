@@ -133,3 +133,57 @@ def test_multi_document_question_verifies_per_attributed_doc(client, tmp_path):
     # The liability sentence lives in doc id2; the verified quote must be
     # attributed to the document that actually contains it (invariant I-7).
     assert any(q["documentId"] == id2 and "liability cap" in q["text"].lower() for q in quotes)
+
+
+class HeadingBodyLLM:
+    """Extractor reproducing the false-negative: the correct provision body
+    never repeats the question's keywords, while generic boilerplate matches
+    exactly one. The lexical focus floor must not turn the real, verified
+    answer into a confident absence (invariant I-5)."""
+
+    REAL = "This synthetic provision governs implementation milestones and acceptance criteria."
+    BOILER = "This synthetic provision covers operational obligations and service administration."
+
+    def complete_json(self, prompt: str):
+        return {
+            "quotes": [
+                {"text": self.REAL, "why": "the scope provision"},
+                {"text": self.BOILER, "why": "mentions service"},
+            ]
+        }
+
+    def complete(self, prompt: str) -> str:  # pragma: no cover - unused
+        return "unused"
+
+    def stream(self, prompt: str):
+        yield "Service scope governs implementation milestones and acceptance criteria [Q1]."
+
+
+def test_focus_floor_cannot_manufacture_false_absence_over_verified_evidence(client, tmp_path):
+    # "WHATS ..." leaks the interrogative "whats" as a focus term, so the
+    # question offers 3 terms and the two-term floor would otherwise discard
+    # every quote: the correct body matches none, the boilerplate matches only
+    # "service". Pre-fix this emptied `verified` and emitted the deterministic
+    # "does not appear to be addressed" despite the answer being verified.
+    pdf = make_text_pdf(tmp_path / "scope.pdf", [HeadingBodyLLM.REAL, HeadingBodyLLM.BOILER])
+    resp = client.post(
+        API + "/upload", files={"file": ("scope.pdf", pdf.read_bytes(), "application/pdf")}
+    )
+    doc_id = resp.json()["id"]
+    db = SessionLocal()
+    try:
+        doc = db.get(Document, doc_id)
+        events = _collect(ask_stream(db, [doc], "WHATS SERVICE SCOPE?", HeadingBodyLLM()))
+    finally:
+        db.close()
+        client.delete(f"{API}/{doc_id}")
+
+    quotes_event = next(e for e in events if e["type"] == "quotes")
+    verified_texts = [q["text"] for q in quotes_event["quotes"]]
+    assert quotes_event["quotes"], "verified evidence must survive the relevance floor"
+    assert HeadingBodyLLM.REAL in verified_texts, "the correct provision must reach composition"
+
+    answer = "".join(e["text"] for e in events if e["type"] == "token")
+    assert "couldn't find" not in answer.lower()
+    assert "does not appear to be addressed" not in answer
+    assert "implementation milestones" in answer.lower()
