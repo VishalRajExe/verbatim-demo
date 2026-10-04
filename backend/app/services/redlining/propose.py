@@ -22,6 +22,7 @@ from sqlalchemy.orm import Session
 from app.models.document import Document
 from app.services.ai.client import LLMClient
 from app.services.qa.chunker import chunk_text
+from app.services.qa.intent import matches_word, specific_keywords
 from app.services.redlining.instructions import (
     Intent,
     find_similar_value,
@@ -30,7 +31,7 @@ from app.services.redlining.instructions import (
     value_in_text,
 )
 from app.services.redlining.prompts import propose_prompt
-from app.services.redlining.tracked_changes import count_occurrences
+from app.services.redlining.tracked_changes import count_occurrences, paragraph_texts
 
 
 @dataclass
@@ -159,6 +160,21 @@ def propose_redline(
             if context and count_occurrences(document, context) == 1:
                 resolved_context = context
             else:
+                # The model returned a bare repeated value with no usable anchor
+                # (a strong model often copies the shortest span). Rather than
+                # dropping a clearly-intended edit, deterministically locate the
+                # clause the instruction points at by matching its concept to the
+                # surrounding document text. This never guesses between two
+                # indistinguishable clauses: it only succeeds when exactly one
+                # occurrence's wording names the concept and its verbatim anchor
+                # is itself unique.
+                resolved_context = _derive_unique_context(
+                    document,
+                    target,
+                    _concept_for_target(target, satisfied),
+                    trimmed,
+                )
+            if not resolved_context:
                 result.dropped.append(
                     {
                         "target": target,
@@ -229,3 +245,49 @@ def _matches_intents(target: str, intents: list[Intent]) -> bool:
         return True
     norm_target = normalize_value(target)
     return any(normalize_value(v) in norm_target for v in named)
+
+
+def _concept_for_target(target: str, intents: list[Intent]) -> str:
+    """The clause descriptor the instruction attaches to this target.
+
+    A multi-change instruction ("change the liability cap ... and the invoice
+    payment period ...") yields one intent per change. Matching the target to
+    the intent that named its original value lets each repeated value be
+    disambiguated by its OWN concept, rather than the diluted union of every
+    concept in the instruction."""
+    norm_target = normalize_value(target)
+    for intent in intents:
+        expected = intent.expected_original
+        if expected and normalize_value(expected) in norm_target:
+            return intent.concept or expected
+    return ""
+
+
+def _derive_unique_context(
+    document: DocxDocument, target: str, concept: str, instruction: str
+) -> str:
+    """Pick the paragraph that pins one occurrence of a repeated ``target``.
+
+    Scores every paragraph containing the target by how many of the
+    instruction's concept words it speaks to, and only returns an anchor when a
+    single clause clearly wins and its full verbatim text occurs exactly once.
+    Returns "" (leaving the edit ambiguous, so the caller drops it) when no
+    clause names the concept or several match equally - an edit is never applied
+    to a guessed occurrence. Attribution is by distinct concept words only: no
+    length or position tiebreak, so two look-alike clauses can never be
+    separated by an arbitrary preference."""
+    keywords = specific_keywords(concept) or specific_keywords(instruction)
+    if not keywords:
+        return ""
+    candidates = [t for t in paragraph_texts(document) if target in t]
+    if len(candidates) < 2:
+        return ""
+    hits = [sum(1 for k in keywords if matches_word(t, k)) for t in candidates]
+    best = max(hits)
+    if best == 0:
+        return ""  # no clause names the concept
+    winners = [t for t, h in zip(candidates, hits) if h == best]
+    if len(winners) != 1:
+        return ""  # several clauses speak equally to the concept -> do not guess
+    anchor = winners[0]
+    return anchor if count_occurrences(document, anchor) == 1 else ""

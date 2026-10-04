@@ -12,9 +12,11 @@ These tests pin both halves of the fix:
   1. the prompt must demand a verbatim ``context`` and show it in the JSON
      schema (so model output carries the field);
   2. an edit whose context uniquely pins one occurrence must be proposed and
-     applied to the RIGHT clause, while the same edit without context must
-     still be dropped as ambiguous (the safe pre-fix behavior is preserved for
-     genuinely unanchorable targets).
+     applied to the RIGHT clause. When the model omits the anchor, the engine
+     falls back to locating the clause from the instruction's own concept, so a
+     distinguishable repeated value still resolves; only a genuinely
+     unanchorable target (no concept tells the clauses apart) is dropped as
+     ambiguous rather than guessed.
 """
 from __future__ import annotations
 
@@ -122,15 +124,61 @@ def test_propose_prompt_requires_verbatim_context():
     assert '"context"' in prompt, "context must appear in the JSON schema the model copies"
 
 
-# ── 2a. Without context the ambiguous edit is dropped (safe pre-fix behavior) ─
+# ── 2a. Without context, a distinguishable target resolves by its concept ─────
 
-def test_repeated_target_without_context_is_dropped(client, client_app, tmp_path):
+def test_repeated_target_without_context_resolves_by_concept(
+    client, client_app, tmp_path
+):
+    """The model returns only the bare repeated value ("30 days"), no anchor.
+
+    The engine must still pin the payment clause from the instruction's concept
+    ("invoice payment period") rather than drop a clearly-intended edit."""
     doc_id = _ready_docx(client, tmp_path, [PAY_P, TERM_P])
     try:
         _override(client_app, ScriptedLLM([
             {"target": "30 days", "replacement": "60 days", "reason": "terms"},
         ]))
-        out = _propose(client, doc_id, INSTRUCTION)
+        ins = "Change the invoice payment period from 30 days to 60 days."
+        out = _propose(client, doc_id, ins)
+        assert len(out["proposed"]) == 1, out["dropped"]
+        edit = out["proposed"][0]
+        assert edit["target"] == "30 days"
+        assert edit["occurrences"] == 2
+        assert "undisputed invoices" in edit["context"]  # pinned to the payment clause
+
+        applied = client.post(
+            f"{API}/{doc_id}/redline",
+            json={
+                "edits": [{
+                    "target": edit["target"],
+                    "replacement": edit["replacement"],
+                    "context": edit["context"],
+                }],
+                "author": "QCoder",
+                "instruction": ins,
+            },
+        )
+        assert applied.status_code == 201, applied.text
+        data = client.get(f"/api/redlines/{applied.json()['id']}/download").content
+        assert count_tracked_changes(data) == (1, 1)
+        paras = _para_texts(data)
+        payment = next(t for t in paras if "undisputed invoices" in t)
+        termination = next(t for t in paras if "terminate for material breach" in t)
+        assert "60 days" in payment
+        assert "30 days" in termination, "the cure period must survive untouched"
+    finally:
+        client.delete(f"{API}/{doc_id}")
+
+
+def test_repeated_target_with_no_concept_is_dropped(client, client_app, tmp_path):
+    """Safety: with no concept to tell the two clauses apart, the engine must
+    not guess - the ambiguous edit is still dropped."""
+    doc_id = _ready_docx(client, tmp_path, [PAY_P, TERM_P])
+    try:
+        _override(client_app, ScriptedLLM([
+            {"target": "30 days", "replacement": "60 days", "reason": "terms"},
+        ]))
+        out = _propose(client, doc_id, "Change 30 days to 60 days.")
         assert out["proposed"] == []
         assert any("more than once" in d["reason"] for d in out["dropped"])
     finally:

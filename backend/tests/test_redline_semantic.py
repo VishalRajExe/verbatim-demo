@@ -287,7 +287,7 @@ def test_already_mutual_clause_is_not_fabricated(client, client_app, tmp_path):
         client.delete(f"{API}/{doc_id}")
 
 
-def test_repeated_target_without_context_stays_ambiguous(client, client_app, tmp_path):
+def _scripted(client_app: FastAPI, edits) -> None:
     class ScriptedLLM:
         def __init__(self, edits):
             self.edits = edits
@@ -301,12 +301,53 @@ def test_repeated_target_without_context_stays_ambiguous(client, client_app, tmp
         def stream(self, prompt):
             yield from ()
 
-    client_app.dependency_overrides[get_llm_dep] = lambda: ScriptedLLM(
-        [{"target": "AED 100,000", "replacement": "AED 999", "reason": "no context"}]
-    )
+    client_app.dependency_overrides[get_llm_dep] = lambda: ScriptedLLM(edits)
+
+
+def test_repeated_target_without_context_resolves_by_concept(
+    client, client_app, tmp_path
+):
+    """A strong model may return just the bare repeated value with no anchor.
+
+    The engine must still pin the RIGHT clause from the instruction's concept
+    ("liability cap"), rather than dropping a clearly-intended edit as
+    ambiguous - the failure that made plain-language redlining look broken."""
+    _scripted(client_app, [
+        {"target": "AED 100,000", "replacement": "AED 999", "reason": "no context"}
+    ])
+    ins = "Change the liability cap from AED 100,000 to AED 999."
     doc_id = _ready_docx(client, tmp_path, FIXTURE_PARAS)
     try:
-        out = _propose(client, doc_id, "Change the liability cap from AED 100,000 to AED 999.")
+        out = _propose(client, doc_id, ins)
+        assert len(out["proposed"]) == 1, out["dropped"]
+        edit = out["proposed"][0]
+        assert edit["target"] == "AED 100,000"
+        assert edit["occurrences"] == 2  # repeats in the fee and liability clauses
+        assert "aggregate liability" in edit["context"]  # pinned to liability
+
+        applied = _apply(client, doc_id, out["proposed"], ins)
+        data = _download(client, applied["id"])
+        assert count_tracked_changes(data) == (1, 1)
+        assert _del_text(data) == "AED 100,000"
+        assert "AED 999" in _ins_text(data)
+        # Only the fee clause still states AED 100,000 verbatim: the liability
+        # occurrence was the one edited, the fee one survives untouched.
+        assert _all_text(data).count("AED 100,000") == 1
+    finally:
+        client.delete(f"{API}/{doc_id}")
+
+
+def test_repeated_target_with_no_concept_stays_ambiguous(
+    client, client_app, tmp_path
+):
+    """Safety: when the instruction names no concept that distinguishes the two
+    occurrences, the engine must NOT guess - the edit is dropped as ambiguous."""
+    _scripted(client_app, [
+        {"target": "AED 100,000", "replacement": "AED 999", "reason": "no context"}
+    ])
+    doc_id = _ready_docx(client, tmp_path, FIXTURE_PARAS)
+    try:
+        out = _propose(client, doc_id, "Change AED 100,000 to AED 999.")
         assert out["proposed"] == []
         assert any("more than once" in d["reason"] for d in out["dropped"])
     finally:

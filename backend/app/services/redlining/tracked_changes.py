@@ -120,6 +120,13 @@ def count_occurrences(document: Document, target: str) -> int:
     return total
 
 
+def paragraph_texts(document: Document) -> list[str]:
+    """Plain text of every paragraph, from the same run-joined source that
+    ``count_occurrences`` matches against. Callers use these as verbatim context
+    anchors, so the strings must be consistent with the uniqueness check."""
+    return [_para_text(para._p) for para in document.paragraphs]
+
+
 def apply_tracked_edit(
     document: Document,
     target: str,
