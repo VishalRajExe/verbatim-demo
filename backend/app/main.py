@@ -54,6 +54,10 @@ app.include_router(comparisons.router, prefix=settings.api_prefix)
 app.include_router(redlines.router, prefix=settings.api_prefix)
 
 
-@app.get("/api/health", tags=["health"])
+@app.get("/health", tags=["health"])
 def health() -> dict:
-    return {"status": "ok", "service": "legal-contract-intelligence"}
+    """Lightweight liveness probe: confirms the backend process is up and can
+    serve HTTP. Intentionally performs NO database query, NO Gemini/API call,
+    NO filesystem or heavy work, and exposes no secrets or internals. Used by
+    the Render health check and UptimeRobot keep-alive monitoring."""
+    return {"status": "ok"}

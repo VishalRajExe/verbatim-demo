@@ -30,7 +30,7 @@ def main() -> int:
     # Wait for health.
     for _ in range(30):
         try:
-            r = httpx.get(f"{BASE}/api/health", timeout=5)
+            r = httpx.get(f"{BASE}/health", timeout=5)
             if r.status_code == 200:
                 print("health:", r.json())
                 break

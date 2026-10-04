@@ -124,7 +124,7 @@ The app now bounds the connect/AUTH handshake with `DB_CONNECT_TIMEOUT`
    `["https://your-app.vercel.app"]`.
 4. Apply. The service **builds `backend/Dockerfile`** (base image
    `python:3.12-slim`), starts uvicorn on `0.0.0.0:$PORT`, and health-checks
-   `/api/health`.
+   `/health`.
 5. Your backend URL is `https://<service>.onrender.com`.
 
 The Blueprint also mounts a **persistent disk** at `/var/data` and points
@@ -143,7 +143,7 @@ see §6).
 
 New → Web Service → connect repo → **Environment/Build: Docker** → **Dockerfile
 Path: `backend/Dockerfile`** → **Context Path: `backend`** → add the env vars
-above → set Health Check Path `/api/health`. (Avoid choosing Runtime: Python
+above → set Health Check Path `/health`. (Avoid choosing Runtime: Python
 here — it defaults to 3.14 and hits the wheel problem above.)
 
 ### Option C — Docker
@@ -200,9 +200,9 @@ Uploaded documents and generated redline `.docx` files are written to
 ## 7. Verify the deployment (smoke test)
 
 ```bash
-# 1) Backend health
-curl https://<backend>.onrender.com/api/health
-# -> {"status":"ok","service":"legal-contract-intelligence"}
+# 1) Backend health (lightweight liveness probe)
+curl https://<backend>.onrender.com/health
+# -> {"status":"ok"}
 
 # 2) Frontend loads
 open https://your-app.vercel.app
@@ -239,7 +239,7 @@ identically in both providers because it is provider-independent.
 | CORS errors in console | Frontend origin not in `CORS_ORIGINS` | Add exact origin; restart backend. `CORS_ORIGINS` accepts a JSON array (`["https://a","https://b"]`) **or** a comma-separated list (`https://a,https://b`). |
 | Uploaded file / redline download 404 after a while | Ephemeral filesystem wiped | Use a persistent disk / object storage (§6). |
 | Streaming answer stalls or times out | Free-tier spin-down or proxy buffering | Use a paid plan for always-on; backend already sends `X-Accel-Buffering: no`. |
-| "Bad gateway" briefly after deploy | Cold start / migrations running | Wait for `/api/health` to return `ok`. |
+| "Bad gateway" briefly after deploy | Cold start / migrations running | Wait for `/health` to return `{"status":"ok"}`. |
 
 ---
 
@@ -250,6 +250,64 @@ identically in both providers because it is provider-independent.
 - **Frontend:** push; Vercel rebuilds. Remember `NEXT_PUBLIC_API_URL` is baked in
   at build time.
 - Env-var changes on either host require a redeploy/restart to take effect.
+
+---
+
+## 11. Health endpoint & UptimeRobot keep-alive
+
+### The `/health` endpoint
+
+The backend exposes a single, lightweight **liveness** endpoint:
+
+```
+GET /health   →   200 OK   Content-Type: application/json
+{ "status": "ok" }
+```
+
+It is intentionally minimal:
+
+- **Public** — no authentication or authorization (the app has no auth layer;
+  only CORS is configured, and `/health` needs no origin header to respond).
+- **Cheap** — no MySQL query, no Gemini/API call, no filesystem scan, no PDF
+  processing, no external request, no heavy computation. It returns instantly
+  and does not modify application state.
+- **Safe** — returns only `{"status":"ok"}`; no secrets, env values, DB
+  credentials, host info, or stack traces.
+
+It answers exactly one question: *"Is the backend process alive and able to
+accept HTTP requests?"* It is **not** a dependency health-check — it will return
+`ok` even if MySQL or Gemini is temporarily unreachable (those failures surface
+on the real API routes, not here).
+
+`render.yaml` sets `healthCheckPath: /health`, so Render gates each deploy on
+this endpoint returning `200`.
+
+### Render → UptimeRobot flow (do this AFTER deploying)
+
+> ⚠️ Create the UptimeRobot monitor **only after** the Render backend has been
+> deployed and its final public URL is known. Do not create it now.
+
+1. Deploy the backend to Render (see §4) and wait until Render provides the
+   public URL, e.g. `https://lci-backend.onrender.com`.
+2. Open `https://<render-url>/health` in a browser or `curl` and confirm you get
+   **HTTP 200** with body `{ "status": "ok" }`.
+3. In UptimeRobot, **Add Monitor** → **HTTP(s)** with:
+   - **Monitor Type:** HTTP(s)
+   - **URL to monitor:** `https://YOUR-RENDER-BACKEND-URL/health`
+   - **Method:** GET
+   - **Monitoring interval:** 5 minutes
+   - **Expected status code:** 200 (and optionally assert the keyword `"ok"`)
+4. Save the monitor and confirm UptimeRobot reports **UP** (receiving 200s).
+
+The monitor only checks that the backend is responding. Point it at `/health`
+**only** — never at an expensive application API (uploads, `/api/ask`,
+comparison, or redline routes), which would burn Gemini quota and do real work
+on every poll.
+
+> Note: a 5-minute UptimeRobot poll also acts as a gentle keep-alive that helps
+> a paid Render instance stay warm. It does **not** prevent the free tier from
+> spinning down between requests, and it is not a substitute for a paid plan if
+> you need guaranteed always-on latency.
 
 ---
 
