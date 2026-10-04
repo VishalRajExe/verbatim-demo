@@ -28,6 +28,10 @@ class Settings(BaseSettings):
     database_url: str = (
         "mysql+pymysql://root:admin@localhost:3306/legal_contract_intelligence"
     )
+    # Bound the TCP/AUTH handshake so an unreachable managed-MySQL host fails
+    # fast with a clear error instead of hanging the whole app startup (which on
+    # Render otherwise stalls until the 15-minute deploy timeout).
+    db_connect_timeout: int = 10
 
     # ─── AI (Gemini) ───
     gemini_api_key: str = ""

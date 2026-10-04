@@ -66,3 +66,14 @@ def test_allowed_extensions_parsing(raw, expected):
 )
 def test_database_url_normalisation(raw, expected):
     assert _settings(database_url=raw).database_url == expected
+
+
+def test_db_connect_args_bounds_mysql_only():
+    from app.db.session import db_connect_args
+    from app.core.config import get_settings
+
+    t = get_settings().db_connect_timeout
+    assert db_connect_args("mysql+pymysql://u@h/db") == {"connect_timeout": t}
+    assert db_connect_args("mysql://u@h/db") == {"connect_timeout": t}
+    assert db_connect_args("sqlite:///test.db") == {}
+    assert db_connect_args("postgresql+psycopg://u@h/db") == {}

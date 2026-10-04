@@ -6,14 +6,14 @@ from pathlib import Path
 import sys
 
 from alembic import context
-from sqlalchemy import engine_from_config, pool
+from sqlalchemy import create_engine, pool
 
 # Ensure the backend directory is importable so `app.*` resolves.
 BACKEND_DIR = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(BACKEND_DIR))
 
 from app.core.config import get_settings  # noqa: E402
-from app.db.session import Base  # noqa: E402
+from app.db.session import Base, db_connect_args  # noqa: E402
 import app.models  # noqa: E402,F401  (registers all tables on Base.metadata)
 
 config = context.config
@@ -46,10 +46,11 @@ def run_migrations_offline() -> None:
 
 
 def run_migrations_online() -> None:
-    connectable = engine_from_config(
-        config.get_section(config.config_ini_section, {}),
-        prefix="sqlalchemy.",
+    url = _sync_url()
+    connectable = create_engine(
+        url,
         poolclass=pool.NullPool,
+        connect_args=db_connect_args(url),
     )
     with connectable.connect() as connection:
         context.configure(

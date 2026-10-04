@@ -40,6 +40,7 @@ templates.
 | Variable | Used by | Default | Notes |
 |---|---|---|---|
 | `DATABASE_URL` | backend | local MySQL | `mysql://…` is auto-normalised to `mysql+pymysql://…`. |
+| `DB_CONNECT_TIMEOUT` | backend | `10` | Seconds to wait for the MySQL connect/AUTH handshake before failing fast (prevents an infinite startup hang). |
 | `GEMINI_API_KEY` | backend | *(empty)* | Required for live answers. |
 | `GEMINI_MODEL` | backend | `gemini-flash-lite-latest` | |
 | `LLM_PROVIDER` | backend | `gemini` | `mock` = offline deterministic demo (no key). |
@@ -70,6 +71,38 @@ The frontend derives its API base from `NEXT_PUBLIC_API_URL`
 > Render does **not** offer managed MySQL (only Postgres/Redis). Keep MySQL
 > external. If you would rather use Render Postgres, that is a code change to
 > the SQLAlchemy dialect/driver and is out of scope for this guide.
+
+### ⚠️ The #1 deploy failure: unreachable database
+
+The app runs migrations **during startup** (`run_migrations()` in the lifespan),
+so it cannot boot — and Render's health check cannot pass — until it can reach
+MySQL. If the deploy log stops at:
+
+```
+INFO app: Starting Legal Contract Intelligence backend...
+INFO:     Waiting for application startup.
+```
+
+…and then stalls until **Timed Out**, the backend cannot connect to your
+`DATABASE_URL`. This is a connectivity/config problem, not a code bug. Check, in
+order:
+
+1. **`DATABASE_URL` is set** on the Render service (not left at the localhost
+   default) and points at your external MySQL.
+2. **Render's egress IPs are allowlisted** by the DB provider. Render's free /
+   starter instances use **shared, rotating outbound IPs** — many providers
+   (PlanetScale, Aiven, etc.) block them by default. Either allowlist Render's
+   published egress ranges, or set the DB to accept connections from any host
+   (with a strong password + TLS).
+3. **TLS is configured.** Most managed MySQL require SSL; append the provider's
+   SSL params to the URL (e.g. `?ssl_mode=REQUIRED`).
+4. **The DB is actually reachable** from outside its own network (not
+   localhost-only, firewall open to 3306/3307).
+
+The app now bounds the connect/AUTH handshake with `DB_CONNECT_TIMEOUT`
+(default **10s**), so an unreachable DB fails fast with a clear
+`Can't connect to MySQL server …` line in the deploy log instead of hanging for
+15 minutes. Fix the connectivity above and redeploy.
 
 ---
 
@@ -196,6 +229,7 @@ identically in both providers because it is provider-independent.
 | Symptom | Likely cause | Fix |
 |---|---|---|
 | Backend boots then crashes on DB | Wrong `DATABASE_URL` / SSL / host not allowlisted | Verify URL; add provider SSL params; allowlist Render egress IPs (PlanetScale). |
+| Stuck at `Waiting for application startup` → **Timed Out** | Cannot reach MySQL (unset `DATABASE_URL`, egress IP blocked, or TLS mismatch) | See §3 "unreachable database"; startup now fails fast after `DB_CONNECT_TIMEOUT` (10s). |
 | Build fails: `metadata-generation-failed ╰─> rapidfuzz` / `Extra keys present in "project"` | Render's native buildpack used **Python 3.14** (no cp314 wheels → source build) | Deploy via the **Docker** runtime (`render.yaml` now does); the image pins `python:3.12`. |
 | `cryptography`/`PyMuPDF` build errors on deploy | Using an interpreter with no prebuilt wheels | Use Python 3.12 (as pinned) or the provided Dockerfile. |
 | Frontend loads, API calls fail | `NEXT_PUBLIC_API_URL` wrong or not rebuilt | Set it and **redeploy** the frontend (build-time var). |
