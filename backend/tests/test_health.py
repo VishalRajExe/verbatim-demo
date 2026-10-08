@@ -34,3 +34,21 @@ def test_health_exposes_no_internals(client):
     body = client.get("/health").json()
     # Only the liveness flag: no service name, env, DB, or host details.
     assert set(body.keys()) == {"status"}
+
+
+def test_health_supports_head(client):
+    # Uptime monitors (e.g. UptimeRobot) default to HEAD requests
+    resp = client.head("/health")
+    assert resp.status_code == 200
+
+
+def test_root_returns_200_ok(client):
+    resp = client.get("/")
+    assert resp.status_code == 200
+    assert resp.json()["status"] == "ok"
+
+
+def test_root_supports_head(client):
+    resp = client.head("/")
+    assert resp.status_code == 200
+

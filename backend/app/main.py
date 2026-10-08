@@ -72,10 +72,23 @@ app.include_router(comparisons.router, prefix=settings.api_prefix)
 app.include_router(redlines.router, prefix=settings.api_prefix)
 
 
-@app.get("/health", tags=["health"])
+@app.api_route("/", methods=["GET", "HEAD"], tags=["health"])
+def root() -> dict:
+    """Root endpoint: confirms the backend is live and provides links to docs and health."""
+    return {
+        "status": "ok",
+        "name": "Legal Contract Intelligence API",
+        "version": "0.1.0",
+        "docs": "/docs",
+        "health": "/health",
+    }
+
+
+@app.api_route("/health", methods=["GET", "HEAD"], tags=["health"])
 def health() -> dict:
     """Lightweight liveness probe: confirms the backend process is up and can
     serve HTTP. Intentionally performs NO database query, NO Gemini/API call,
     NO filesystem or heavy work, and exposes no secrets or internals. Used by
     the Render health check and UptimeRobot keep-alive monitoring."""
     return {"status": "ok"}
+
