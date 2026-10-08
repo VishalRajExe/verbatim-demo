@@ -10,6 +10,12 @@
 # are read from the Render dashboard on (re)deploy, so nothing sensitive lands
 # in git. Create the service with:  render blueprints sync   (or via the UI).
 #
+# ── Service name ─────────────────────────────────────────────────────────────
+# The name below MUST match the live Render service name exactly so that
+# 'render blueprints sync' updates the correct running service rather than
+# creating a duplicate. Current live service: verbatim-demo
+# (https://verbatim-demo.onrender.com).
+#
 # ── Why Docker instead of Render's native Python buildpack ────────────────────
 # Render's default Python is now 3.14, and our pinned packages (rapidfuzz,
 # PyMuPDF, cryptography, lxml) have NO cp314 wheels. On 3.14 pip falls back to
@@ -20,17 +26,24 @@
 # so we build the repo's backend/Dockerfile instead. Its base image
 # (python:3.12-slim) pins the interpreter, so every dependency installs from a
 # prebuilt wheel and the build is deterministic.
+#
+# ── Plan note ────────────────────────────────────────────────────────────────
+# The live service runs on the free plan. Free-tier instances spin down after
+# 15 minutes of inactivity; the UptimeRobot keep-alive monitor at /health
+# (every 5 min) prevents sleep. Persistent disks require a paid plan and are
+# therefore not attached here; uploaded files are ephemeral on free tier
+# (DB rows survive, file bytes do not — see DEPLOYMENT.md §6).
 # ─────────────────────────────────────────────────────────────────────────────
 
 services:
   - type: web
-    name: lci-backend
+    name: verbatim-demo      # MUST match the live Render service name exactly
     runtime: docker
-    plan: starter            # Docker services require a paid instance plan
+    plan: free               # Matches live service plan (free tier)
     region: oregon
     dockerfilePath: ./backend/Dockerfile
     dockerContext: ./backend
-    healthCheckPath: /health
+    healthCheckPath: /health  # GET /health → 200 {"status":"ok"} (no DB, lightweight)
     autoDeployTrigger: commit
 
     envVars:
@@ -48,17 +61,19 @@ services:
         # JSON list of allowed browser origins. Replace with your Vercel URL.
         value: '["http://localhost:3000","https://your-app.vercel.app"]'
       - key: STORAGE_DIR
-        value: "/var/data/lci"   # mounted persistent disk (uploads + redlines)
+        value: "/app/data"   # ephemeral on free tier; mount a disk on a paid plan
       - key: MAX_FILE_SIZE_MB
         value: "80"
 
-    # Persistent disk so uploaded documents and generated redlines survive
-    # restarts/redeploys. Requires a paid instance plan; on the free plan the
-    # filesystem is ephemeral (see DEPLOYMENT.md "Storage & persistence").
-    disks:
-      - name: lci-storage
-        mountPath: /var/data
-        sizeGB: 1
+    # ── Persistent disk (paid plans only) ────────────────────────────────────
+    # Uncomment the block below when upgrading to a paid Render plan. On free
+    # tier the filesystem is ephemeral; uploaded files are lost on restart but
+    # DB rows survive. To re-enable, also update STORAGE_DIR to /var/data/lci.
+    #
+    # disks:
+    #   - name: lci-storage
+    #     mountPath: /var/data
+    #     sizeGB: 1
 
   # ── Native-Python alternative (only if you cannot switch this service to
   #    Docker). Render's buildpack still needs a 3.12/3.13 interpreter for the
