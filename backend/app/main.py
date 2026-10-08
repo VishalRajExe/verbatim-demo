@@ -21,14 +21,32 @@ logger = logging.getLogger("app")
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
+    """Start the server immediately so /health responds during cold-start.
+
+    Migrations run in a daemon background thread so the lifespan yield is
+    reached instantly.  The /health endpoint becomes reachable within a
+    second of the process starting — before the MySQL handshake completes —
+    which keeps UptimeRobot from timing out on free-tier cold starts.
+
+    If migrations fail the error is logged; DB-dependent API routes will
+    surface the failure naturally on their first call (same behaviour as
+    before, just without blocking startup).
+    """
+    import threading
+
     logger.info("Starting Legal Contract Intelligence backend...")
-    try:
-        run_migrations()
-        logger.info("Database migrations applied.")
-    except Exception:  # noqa: BLE001
-        logger.exception("Migration failed on startup.")
-        raise
-    logger.info("Backend ready.")
+
+    def _run_migrations_bg() -> None:
+        try:
+            run_migrations()
+            logger.info("Database migrations applied.")
+        except Exception:  # noqa: BLE001
+            logger.exception("Migration failed (background thread); DB routes may error.")
+
+    t = threading.Thread(target=_run_migrations_bg, daemon=True, name="migrations")
+    t.start()
+
+    logger.info("Backend ready — accepting requests while migrations run in background.")
     yield
     logger.info("Shutting down backend.")
 

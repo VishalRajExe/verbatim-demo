@@ -40,7 +40,7 @@ services:
     name: verbatim-demo      # MUST match the live Render service name exactly
     runtime: docker
     plan: free               # Matches live service plan (free tier)
-    region: oregon
+    region: singapore
     dockerfilePath: ./backend/Dockerfile
     dockerContext: ./backend
     healthCheckPath: /health  # GET /health → 200 {"status":"ok"} (no DB, lightweight)
