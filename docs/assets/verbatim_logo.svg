@@ -1,0 +1,113 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512" width="100%" height="100%">
+  <defs>
+    <!-- Background Gradient -->
+    <linearGradient id="bgGrad" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#ffffff" />
+      <stop offset="100%" stop-color="#f8fafc" />
+    </linearGradient>
+
+    <!-- Brand Cyan-Blue Gradient -->
+    <linearGradient id="brandGrad" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#0284c7" />
+      <stop offset="50%" stop-color="#2563eb" />
+      <stop offset="100%" stop-color="#1d4ed8" />
+    </linearGradient>
+
+    <!-- Accent Verified Cyan Gradient -->
+    <linearGradient id="accentGrad" x1="0%" y1="100%" x2="100%" y2="0%">
+      <stop offset="0%" stop-color="#06b6d4" />
+      <stop offset="100%" stop-color="#3b82f6" />
+    </linearGradient>
+
+    <!-- Soft Ambient Drop Shadow -->
+    <filter id="squircleShadow" x="-10%" y="-10%" width="120%" height="125%" filterUnits="userSpaceOnUse">
+      <feDropShadow dx="0" dy="16" stdDeviation="24" flood-color="#0f172a" flood-opacity="0.08" />
+      <feDropShadow dx="0" dy="4" stdDeviation="8" flood-color="#0f172a" flood-opacity="0.04" />
+    </filter>
+
+    <filter id="iconGlow" x="-20%" y="-20%" width="140%" height="140%" filterUnits="userSpaceOnUse">
+      <feDropShadow dx="0" dy="6" stdDeviation="10" flood-color="#2563eb" flood-opacity="0.22" />
+    </filter>
+  </defs>
+
+  <!-- Squircle Base Canvas -->
+  <rect
+    x="32"
+    y="32"
+    width="448"
+    height="448"
+    rx="108"
+    fill="url(#bgGrad)"
+    stroke="#e2e8f0"
+    stroke-width="2.5"
+    filter="url(#squircleShadow)"
+  />
+
+  <!-- Subtle Inner Ring Highlight -->
+  <rect
+    x="36"
+    y="36"
+    width="440"
+    height="440"
+    rx="104"
+    fill="none"
+    stroke="#ffffff"
+    stroke-width="2"
+  />
+
+  <!-- Main Monogram Group: Geometric 'V' + Legal Scales + Checkmark -->
+  <g filter="url(#iconGlow)">
+    <!-- Central Verbatim Outer 'V' Crest -->
+    <path
+      d="M 148 152 L 256 384 L 364 152 L 324 152 L 256 312 L 188 152 Z"
+      fill="url(#brandGrad)"
+    />
+
+    <!-- Balance Scale Beam Arc (Connecting Left and Right Anchors) -->
+    <path
+      d="M 120 220 C 180 180, 332 180, 392 220"
+      fill="none"
+      stroke="url(#brandGrad)"
+      stroke-width="12"
+      stroke-linecap="round"
+    />
+
+    <!-- Pivot Fulcrum Crown -->
+    <polygon
+      points="256,160 268,188 244,188"
+      fill="url(#brandGrad)"
+    />
+
+    <!-- Left Scale Suspension & Pan -->
+    <g>
+      <line x1="120" y1="220" x2="96" y2="284" stroke="url(#brandGrad)" stroke-width="7" stroke-linecap="round" />
+      <line x1="120" y1="220" x2="144" y2="284" stroke="url(#brandGrad)" stroke-width="7" stroke-linecap="round" />
+      <!-- Left Pan -->
+      <path
+        d="M 84 284 Q 120 316 156 284 Z"
+        fill="url(#brandGrad)"
+      />
+    </g>
+
+    <!-- Right Scale Suspension & Pan -->
+    <g>
+      <line x1="392" y1="220" x2="368" y2="284" stroke="url(#accentGrad)" stroke-width="7" stroke-linecap="round" />
+      <line x1="392" y1="220" x2="416" y2="284" stroke="url(#accentGrad)" stroke-width="7" stroke-linecap="round" />
+      <!-- Right Pan -->
+      <path
+        d="M 356 284 Q 392 316 428 284 Z"
+        fill="url(#accentGrad)"
+      />
+    </g>
+
+    <!-- Core Verification Checkmark (Nested at Center) -->
+    <path
+      d="M 226 244 L 248 274 L 296 210"
+      fill="none"
+      stroke="url(#accentGrad)"
+      stroke-width="14"
+      stroke-linecap="round"
+      stroke-linejoin="round"
+    />
+  </g>
+</svg>

@@ -1,4 +1,16 @@
-# ⚖️ Verbatim — Legal Contract Intelligence
+<div align="center">
+  <img src="docs/assets/verbatim_icon_minimal.jpg" alt="Verbatim Logo" width="120" height="120" style="border-radius: 26px;" />
+  <h1>Verbatim</h1>
+  <p><strong>Deterministic AI Contract Verification & Citation Engine</strong></p>
+  <p>
+    <a href="https://verbatim-demo.onrender.com">Live Demo</a> ·
+    <a href="#-system-architecture">Architecture</a> ·
+    <a href="#-core-pillars--working-functions">Core Pillars</a> ·
+    <a href="#-running-locally">Quickstart</a>
+  </p>
+</div>
+
+---
 
 **A grounded, citation-verified AI workspace for legal contracts.** Upload complex PDF and DOCX agreements, ask multi-clause questions answered *strictly* from independently verified passages, compare contract versions clause-by-clause with materiality scoring, and generate Microsoft Word redlines with native OpenXML (`<w:ins>` / `<w:del>`) tracked changes.
 
